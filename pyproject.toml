@@ -1,0 +1,105 @@
+[project]
+name = "branham-model-api"
+version = "0.1.0"
+description = "Production-grade Python API for fast RAG pipeline + multilingual generator with strict grounding and message references"
+readme = "README.md"
+requires-python = ">=3.12"
+license = {text = "MIT"}
+dependencies = [
+    "accelerate>=1.12.0",
+    "aiosqlite>=0.22.1",
+    "bitsandbytes>=0.49.1",
+    "datasets>=4.4.2",
+    "einops>=0.8.1",
+    "evaluate>=0.4.6",
+    "faiss-cpu>=1.13.2",
+    "fastapi>=0.128.0",
+    "gunicorn>=23.0.0",
+    "ninja>=1.13.0",
+    "peft>=0.18.0",
+    "protobuf>=6.33.2",
+    "pydantic>=2.12.5",
+    "pydantic-settings>=2.12.0",
+    "rank-bm25>=0.2.2",
+    "safetensors>=0.7.0",
+    "scipy>=1.16.3",
+    "sentencepiece>=0.2.1",
+    "spacy>=3.8.11",
+    "sse-starlette>=3.1.2",
+    "tensorboard>=2.20.0",
+    "tiktoken>=0.12.0",
+    "torch>=2.9.1",
+    "transformers>=4.57.3",
+    "trl>=0.26.2",
+    "uvicorn[standard]>=0.40.0",
+    "wandb>=0.23.1",
+]
+
+[project.optional-dependencies]
+# Note: faiss-gpu doesn't support Python 3.12 yet (max is 3.10)
+# For GPU support, you may need to build from source or use Python 3.10
+
+# Optional optimizations (gated by flags)
+optimum = [
+    "optimum>=1.14.0",
+]
+
+# Flash attention / xformers (optional, gated by flags)
+# Note: xformers may have compatibility issues with latest PyTorch
+flash-attn = [
+    "flash-attn>=2.0.0",
+]
+
+# Redis support (optional, for text store)
+redis = [
+    "redis>=5.0.0",
+    "hiredis>=2.2.0",
+]
+
+# PostgreSQL support (optional, for text store)
+postgres = [
+    "psycopg2-binary>=2.9.9",
+    "asyncpg>=0.29.0",
+]
+
+[dependency-groups]
+dev = [
+    "black>=25.12.0",
+    "mypy>=1.19.1",
+    "pytest>=9.0.2",
+    "pytest-asyncio>=1.3.0",
+    "pytest-cov>=7.0.0",
+    "ruff>=0.14.11",
+    "types-pyyaml>=6.0.12.20250915",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/branham_model_api"]
+
+[tool.black]
+line-length = 100
+target-version = ['py312']
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+select = ["E", "F", "I", "N", "W", "UP"]
+ignore = ["E501"]  # Line length handled by black
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+ignore_missing_imports = true  # Needed for torch, transformers, etc.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]

@@ -1,0 +1,76 @@
+# Default Configuration for Branham Model API
+
+# Device Configuration
+device:
+  preference: auto  # Options: mps, cuda, cpu, auto
+  use_bnb_quant: false
+  dtype: fp16  # Options: fp16, bf16, fp32
+
+# API Configuration
+api:
+  host: 0.0.0.0
+  port: 8000
+  workers: 1
+  log_level: info
+  cors_origins:
+    - "*"
+
+# Model Configuration (Configurable - no hard-coded choices)
+models:
+  embedding_model_id: null  # To be configured
+  reranker_model_id: null   # To be configured
+  generator_model_id: null  # To be configured
+  tokenizer_model_id: null  # To be configured
+
+# Retrieval Configuration
+retrieval:
+  bm25:
+    top_n: 20
+    threshold: 0.5
+  dense:
+    top_n: 20
+  reranker:
+    enabled: conditional  # Options: always, conditional, never
+    trigger_threshold: 0.15
+  fusion:
+    final_top_k: 7
+  expansion:
+    default_depth: 1
+    max_depth: 2
+
+# Chunking Configuration (Section 5.1)
+chunking:
+  target_tokens: 350
+  strategy: paragraph_aware  # Cut at paragraph boundaries
+  sentence_split: true  # Split long paragraphs at sentence boundaries
+
+# Text Store Configuration
+text_store:
+  type: sqlite  # Options: sqlite, redis, postgres, files
+  sqlite:
+    path: ./data/chunks.db
+  # redis:
+  #   url: redis://localhost:6379/0
+  # postgres:
+  #   url: postgresql://user:pass@localhost/branham
+
+# Index Paths
+indices:
+  bm25_path: ./indices/bm25.pkl
+  faiss_path: ./indices/faiss.index
+  chunk_store_path: ./data/chunks.db
+
+# Model Paths (for LoRA adapters)
+adapters:
+  continued_pretrain: ./models/adapters/continued_pretrain
+  qa_instruction: ./models/adapters/qa_instruction
+
+# Performance & Latency Targets (Section 2.2)
+performance:
+  retrieval_target_ms: 150  # p95 retrieval stage target
+  ttft_target_ms: 1200      # p95 time-to-first-token target
+
+# Refusal Messages
+refusal:
+  fixed_message: "I can only answer questions based on William Branham's sermons. I don't have enough relevant information to answer your question."
+

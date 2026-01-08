@@ -1,0 +1,20 @@
+# Development Configuration
+
+# Inherits from default.yaml and overrides specific values
+
+api:
+  log_level: debug
+  workers: 1
+
+models:
+  # Dev models (smaller/faster for development)
+  embedding_model_id: sentence-transformers/all-MiniLM-L6-v2
+  generator_model_id: meta-llama/Llama-2-7b-chat-hf  # Example
+
+device:
+  preference: auto
+
+retrieval:
+  reranker:
+    enabled: never  # Disable reranker in dev for faster iteration
+

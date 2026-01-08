@@ -1,0 +1,64 @@
+# Working Progress
+
+Succinct log of development progress.
+
+---
+
+## 2025-01-08
+
+### Environment Setup
+- ✅ Installed `uv` via Homebrew
+- ✅ Initialized project with `uv init` (Python 3.12.12)
+- ✅ Added core dependencies: FastAPI, PyTorch 2.9.1, Transformers 4.57.3, PEFT, Accelerate
+- ✅ Added retrieval stack: FAISS-CPU, rank-bm25, aiosqlite
+- ✅ Added tokenization: sentencepiece (Llama/Qwen), tiktoken
+- ✅ Added training tools: TRL, WandB, TensorBoard, evaluate, spacy
+- ✅ Added dev tools: pytest, black, ruff, mypy
+- ✅ Configured optional extras: optimum, redis, postgres
+- ✅ Total packages: 127 installed
+- ✅ Verified device support: MPS detected (Apple Silicon)
+
+### Project Structure
+- ✅ Created complete directory tree per `.cursorrules` Section 12
+- ✅ 24 directories, 40+ files created
+- ✅ All Python packages initialized with `__init__.py`
+- ✅ Config system: `default.yaml`, `dev.yaml`, `prod.yaml`
+
+### API Layer
+- ✅ FastAPI application skeleton (`src/branham_model_api/api/main.py`)
+- ✅ Routes: `/chat`, `/health`
+- ✅ Pydantic schemas: `ChatRequest`, `ChatResponse`, `Reference`
+- ✅ Middleware structure
+- ✅ Verified: API imports successfully
+
+### Core Utilities
+- ✅ Device selection: `get_device()`, `get_dtype()` - supports MPS/CUDA/CPU
+- ✅ System prompt template (Section 7 compliant)
+
+### Documentation
+- ✅ `.cursorrules` - Complete architecture & rules (469 lines)
+- ✅ `DATA_FORMAT.md` - Data format specification
+- ✅ `TRAINING_GUIDE.md` - Training workflows
+- ✅ `REPOSITORY_TREE.md` - Full structure documentation
+- ✅ `PROJECT_STATUS.md` - Current status & roadmap
+- ✅ `SETUP_COMMANDS.md` - Command reference
+- ✅ `README.md` - Updated with setup instructions
+
+### Test Structure
+- ✅ Test stubs: `test_chunking.py`, `test_fusion_dedup.py`, `test_postcheck.py`
+
+### Configuration
+- ✅ `.gitignore` - Comprehensive ignore patterns
+- ✅ `.python-version` - Python 3.12
+- ✅ `pyproject.toml` - Dependencies, build config, tool settings
+- ✅ `uv.lock` - Locked versions (3684 lines)
+- ✅ `.env.example` template (blocked by gitignore)
+
+---
+
+## Status Summary
+
+**Completed**: Environment setup, project scaffolding, API skeleton, configuration, documentation
+**Next**: Dataset preparation → Retrieval implementation → RAG pipeline → Model loaders → Training
+**Progress**: Foundation complete, ready for implementation
+

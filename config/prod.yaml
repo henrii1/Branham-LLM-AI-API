@@ -1,0 +1,23 @@
+# Production Configuration
+
+# Inherits from default.yaml and overrides specific values
+
+api:
+  log_level: info
+  workers: 4
+  cors_origins:
+    - "https://yourdomain.com"
+
+device:
+  preference: auto
+  use_bnb_quant: true  # Enable quantization in production
+  dtype: fp16
+
+retrieval:
+  reranker:
+    enabled: conditional  # Use reranker when needed
+
+performance:
+  retrieval_target_ms: 100  # Stricter target in production
+  ttft_target_ms: 1000
+

@@ -1,0 +1,468 @@
+# Cursor Rules — Branham Model API (Python / Hugging Face Stack)
+
+Project: **Branham Model API**
+
+Purpose: Build a production-grade Python API that serves a **fast RAG pipeline** + **multilingual generator** with **strict grounding** and **message references**.  
+This API is the *only* AI endpoint called by the web app (Next.js + Supabase).
+
+---
+
+## 0) Non-negotiables
+
+- **Python-first** implementation.
+- Avoid framework-heavy RAG orchestration layers (e.g., LlamaIndex) unless there is a measured performance win.
+- RAG is authoritative for verification and references. Fine-tuning helps style/synthesis, but does **not** replace retrieval for correctness.
+- Must support:
+  - Apple Silicon **MPS**
+  - **Single NVIDIA GPU**
+  - **Multi-GPU** training (via `accelerate`)  
+    Inference multi-GPU is optional but the design must not block it later.
+- Must support **concurrency** (handful of concurrent users) and stream responses.
+- **No hard-coded model choices.** Embedding model, reranker, generator, tokenizer must be configurable via env/config.
+- **Single markdown file** should be usable as Cursor rules. Keep it explicit and implementation-oriented.
+
+---
+
+## 1) Domain constraints and design implications
+
+### 1.1 Sermon structure constraints
+- Sermons often tell long stories across multiple paragraphs.
+- Users may remember the teaching conceptually but not exact words; BM25 alone can miss paraphrases.
+- Therefore:
+  - We need **hybrid retrieval** (BM25 + dense).
+  - We need **context reconstruction** around retrieved chunks (bounded neighborhood expansion).
+
+### 1.2 Canonical reference system (LOCKED)
+- Each sermon has a unique **date_id** (no duplicates across the corpus).
+- date_id format: `dd-mm-yy--<T>` where `<T>` ∈ `{M, E}`:
+  - `M` = morning
+  - `E` = evening
+- References must always include:
+  - `date_id`
+  - paragraph number(s) (`paragraph_start`, `paragraph_end`)
+  - chunk_id(s) used for grounding
+- Sermon titles may appear in other languages (model may infer due to pretraining), but **date_id is the canonical and stable locator**.
+- We do not rely on char/token offsets; paragraph range is the location anchor.
+
+### 1.3 Multilingual behavior (v1)
+- v1 will index **English corpus** only.
+- Users may query in other languages.
+- Generator outputs answer in user’s language.
+- References remain in the canonical format: date_id + paragraph range + chunk_ids.
+
+---
+
+## 2) System goals (product + latency)
+
+### 2.1 Behavior goals
+- Answer only when the retrieved evidence supports the response.
+- If evidence is insufficient/mismatched → return a **fixed refusal** message.
+- Responses must include references and should support:
+  - **Inline references** inside the answer when relevant.
+  - A **References** block at the end (like mature RAG systems).
+
+### 2.2 Latency goals (architecture targets)
+- p95 retrieval stage (BM25 + dense + fusion + dedup + expansion): target < 150ms on production hardware.
+- p95 TTFT (time-to-first-token): target < 1.2s (single GPU).
+- Reranker is conditional; do not pay its cost on clean queries.
+- Streaming required (SSE preferred).
+
+Caching policy:
+- **App layer** (Next.js backend) handles caching if any.
+- Model API should not depend on caching for correctness.
+- The Model API may still keep warm state (loaded models, loaded indices, etc.).
+
+---
+
+## 3) Technology stack (required)
+
+### 3.1 Language/runtime
+- Python **3.12+** (3.13 allowed if compatible with dependencies)
+- FastAPI + Uvicorn/Gunicorn
+- Streaming: SSE (preferred), WebSocket optional
+
+### 3.2 Hugging Face + PyTorch stack
+- torch
+- transformers
+- accelerate (multi-GPU training)
+- peft (LoRA)
+- bitsandbytes (QLoRA / quantization on NVIDIA)
+- datasets
+- safetensors
+
+Optional (gated by flags; do not assume availability):
+- optimum
+- flash-attn / xformers
+- torch.compile
+
+### 3.3 Retrieval stack (low-level)
+- BM25:
+  - lightweight library or custom BM25
+  - should index the same text chunks stored in the text store
+- Dense retrieval:
+  - FAISS baseline (fast, low-level)
+  - alternative vector DB allowed but optional
+- Text store:
+  - batch lookup by chunk_id
+  - Postgres/SQLite/Redis/files acceptable; optimize for fast lookup
+
+---
+
+## 4) Data storage conventions
+
+### 4.1 Text store schema (LOCKED)
+Each chunk record:
+- `chunk_id` (unique)
+- `date_id` (sermon identifier)
+- `paragraph_start` (int)
+- `paragraph_end` (int)
+- `chunk_index` (int, position within date_id; recommended for expansion)
+- `text` (string)
+
+No offsets required.
+
+### 4.2 BM25 index mapping and dedup
+Preferred approach:
+- BM25 indexes the same chunk text used by dense retrieval, keyed by `chunk_id`.
+- This makes fusion and dedup trivial: dedup is done by `chunk_id`.
+
+If BM25 must use different indexing units:
+- Example: BM25 unit = “3 paragraphs per unit”
+- Then BM25 must still map deterministically back to underlying `chunk_id`s so:
+  - we can deduplicate against dense results
+  - we can expand properly using chunk adjacency
+
+---
+
+## 5) Chunking and context expansion (LOCKED)
+
+### 5.1 Chunking rule (LOCKED)
+Goal: narrative-friendly but retrieval-stable chunking.
+
+- Create paragraph-aware token-budget chunks around **~350 tokens**.
+- Cut only at paragraph boundaries.
+- If a paragraph is too long for the token budget:
+  - split that paragraph on **sentence boundaries**
+- No overlap (we retrieve multiple chunks and expand as needed).
+- Store paragraph ranges per chunk.
+
+### 5.2 Bounded neighborhood expansion (LOCKED)
+We reconstruct story continuity without storing separate “parent chunks”.
+
+- Default expansion depth: **±1 chunk**
+- Allow **±2** chunks when more context is needed.
+- Expansion triggers should include:
+  - query patterns (regex) suggesting narrative/synthesis (e.g., “tell the story”, “explain the context”, “what happened when…”)
+  - retrieval confidence signals (flat scores / low overlap / low confidence)
+  - reranker-triggered cases (often indicates ambiguity)
+
+Expansion constraints:
+- Must respect strict token budget caps.
+- Must deduplicate repeated chunks.
+- Prefer continuity within same date_id.
+
+---
+
+## 6) Retrieval + reranking + generation flow (LOCKED)
+
+### 6.1 Overview
+The system is explicitly built to:
+- avoid hallucinations
+- avoid answering generic/out-of-domain queries
+- remain fast by skipping reranking unless necessary
+
+### 6.2 Fixed refusal behavior
+There are two refusal paths:
+1) **Pre-LLM refusal**: early BM25 guard fails (fast skip)
+2) **Post-LLM refusal**: model output fails evidence alignment / references / formatting checks
+
+### 6.3 End-to-end pipeline steps (LOCKED)
+1) Receive query request.
+2) Normalize query (whitespace, punctuation).
+3) Regex checks:
+   - quote intent (e.g., “exact quote”, “where did he say”, “which sermon”)
+   - narrative intent patterns (optional)
+4) **Early BM25 guard**:
+   - Run a fast BM25 check.
+   - If BM25 returns “nothing good” (below configured threshold) → return fixed refusal (no model call).
+5) Run **BM25 + dense retrieval in parallel** (topN each; config-driven).
+6) Compute retrieval signals:
+   - dense score flatness
+   - overlap between BM25 and dense top results
+   - confidence heuristics
+7) Conditional reranker:
+   - Trigger if quote intent OR flatness OR low overlap OR low confidence.
+8) Fuse + dedup:
+   - merge BM25 + dense (+ reranker if present)
+   - deduplicate by chunk_id
+   - optionally consolidate by date_id
+9) Select final top-K chunks:
+   - typically K in [5..10], config-driven
+10) Expand context:
+   - bounded expansion ±1 default; ±2 on triggers
+11) Build prompt with:
+   - system prompt rules
+   - retrieved context
+   - user language
+   - formatting requirements (inline refs + refs block)
+12) Generate response (multilingual LLM + LoRA adapters).
+13) Post-check enforcement:
+   - references present
+   - references valid (date_id exists; chunk_ids exist; paragraph range present)
+   - output format compliance
+   - evidence alignment (if required checks fail → refusal)
+14) Return answer + references payload.
+
+---
+
+## 7) System prompt contract (must be enforced)
+
+System prompt must guide the model to:
+- Answer ONLY using the provided sermon context.
+- If context does not support the answer, output the fixed refusal message.
+- Never answer generic questions unrelated to Branham sermons.
+- Always include references:
+  - inline references when appropriate (e.g., `[47-0412--M: ¶2–¶3]`)
+  - plus a consolidated references list at end
+
+Important: Server-side post-check must enforce the contract; do not rely on prompt alone.
+
+---
+
+## 8) Training plan (LoRA / QLoRA)
+
+### 8.1 Continued pretraining adapter (LOCKED intention)
+- Train a LoRA/QLoRA adapter on the sermon corpus to internalize:
+  - sermon tone, cadence
+  - recurring motifs and phrasing
+  - multilingual sermon-title familiarity (if multilingual shards are included)
+
+### 8.2 Training data format
+- JSONL preferred.
+- Each record should include at least:
+  - `text`
+  - `date_id`
+  - `language`
+  - `paragraph_start`
+  - `paragraph_end`
+- Shard deterministically for reproducibility.
+
+### 8.3 Q/A instruction adapter
+- Separate dataset creation pipeline to create grounded Q/A records.
+- Must teach:
+  - cite-or-refuse behavior
+  - quote-intent behavior
+  - multilingual output formatting
+
+---
+
+## 9) Hardware and device support rules
+
+### 9.1 Device selection
+- Prefer `mps` if available and enabled.
+- Else prefer `cuda`.
+- Else CPU.
+
+### 9.2 Configuration flags (required)
+- `DEVICE_PREFERENCE=mps|cuda|cpu|auto`
+- `USE_BNB_QUANT=true|false`
+- `DTYPE=fp16|bf16|fp32`
+
+### 9.3 Multi-GPU
+- Training must support multi-GPU via `accelerate`.
+- Keep inference modular so multi-GPU inference can be added later (do not hardcode single-device assumptions).
+
+---
+
+## 10) API contract
+
+### 10.1 POST /chat
+Request fields:
+- `session_id` (string)
+- `user_language` (ISO/BCP-47)
+- `query` (string)
+- Optional:
+  - `history_window` (recent turns)
+  - `conversation_summary` (optional; typically only provided on first message or when it changes)
+
+Response fields:
+- `answer` (string)
+- `mode` (`quote` | `synthesis` | `refusal`)
+- `references` (array):
+  - `date_id`
+  - `paragraph_start`
+  - `paragraph_end`
+  - `chunk_ids` (array)
+
+### 10.2 GET /health
+- readiness check: indices available + model loaded
+
+---
+
+## 11) Preferred reference rendering
+
+- Inline references in the answer when relevant:
+  - Example: `... (see [47-0412--M: ¶2–¶3])`
+- References block at end (consolidated):
+  - Each item includes date_id + paragraph range + optionally title.
+
+---
+
+## 12) Required repository layout (scaffold)
+
+The repository must be organized so each subsystem is clear and independently runnable.
+
+model-api/
+- README.md
+- config/
+  - default.yaml
+  - dev.yaml
+  - prod.yaml
+- src/
+  - api/
+    - main.py
+    - routes/
+      - chat.py
+      - health.py
+    - schemas/
+      - request.py
+      - response.py
+    - middleware/
+      - logging.py
+  - core/
+    - pipeline/
+      - rag_pipeline.py
+      - fusion.py
+      - rerank.py
+      - expansion.py
+      - postcheck.py
+      - signals.py
+    - prompts/
+      - system_prompt.txt
+      - templates.py
+    - refs/
+      - format_refs.py
+  - retrieval/
+    - bm25/
+      - index.py
+      - query.py
+    - dense/
+      - embedder.py
+      - index_faiss.py
+      - query.py
+    - store/
+      - chunk_store.py
+  - models/
+    - generator/
+      - load.py
+      - infer.py
+    - reranker/
+      - load.py
+      - infer.py
+  - utils/
+    - device.py
+    - batching.py
+    - timing.py
+- datasets/
+  - ingest/
+    - parse_sermons.py
+    - normalize.py
+    - build_chunks.py
+  - export/
+    - to_jsonl.py
+    - upload_dataset.py
+  - docs/
+    - DATA_FORMAT.md
+- training/
+  - continued_pretrain/
+    - train_lora.py
+    - accelerate_config.yaml
+  - instruction_tune/
+    - build_qa.py
+    - train_qa_lora.py
+  - eval/
+    - retrieval_eval.py
+    - generation_eval.py
+  - docs/
+    - TRAINING_GUIDE.md
+- scripts/
+  - build_bm25_index.py
+  - build_faiss_index.py
+  - run_dev.sh
+- tests/
+  - test_chunking.py
+  - test_fusion_dedup.py
+  - test_postcheck.py
+
+---
+
+## 13) ASCII architecture diagram (clean, readable)
+
++------------------+          +-------------------------+
+|     Frontend     |          |     Web App Backend     |
+| (Next.js client) |--HTTPS-->| (sessions, history, DB) |
++------------------+          +-----------+-------------+
+                                        |
+                                        | Single downstream call
+                                        v
+                         +--------------+--------------+
+                         |        Branham Model API    |
+                         |   (FastAPI + SSE streaming) |
+                         +--------------+--------------+
+                                        |
+                                        v
+         +------------------------- Pipeline (Request) -------------------------+
+         |                                                                      |
+         |  1) Normalize query + regex intent flags                             |
+         |                                                                      |
+         |  2) Early BM25 guard                                                 |
+         |     - if "not good": return fixed refusal (NO generator call)        |
+         |                                                                      |
+         |  3) Parallel retrieval                                               |
+         |     +------------------+      +------------------+                  |
+         |     |      BM25        |      | Dense (Embed+ANN)|                  |
+         |     | (topN chunks)    |      | (FAISS topN)     |                  |
+         |     +---------+--------+      +---------+--------+                  |
+         |               \__________________________/                           |
+         |                          |                                           |
+         |  4) Signals: flatness / overlap / confidence                         |
+         |                                                                      |
+         |  5) Conditional reranker (only if triggered)                         |
+         |                                                                      |
+         |  6) Fusion + dedup (chunk_id) + optional date_id consolidation       |
+         |                                                                      |
+         |  7) Select top-K chunks (K ~ 5..10)                                  |
+         |                                                                      |
+         |  8) Bounded neighborhood expansion                                   |
+         |     - ±1 default                                                     |
+         |     - ±2 if rules/confidence indicate need for more context          |
+         |                                                                      |
+         |  9) Prompt build (system rules + context + user language)            |
+         |                                                                      |
+         | 10) Multilingual generator + LoRA adapters                           |
+         |     - continued pretrain adapter                                     |
+         |     - Q/A instruction adapter (later)                                |
+         |                                                                      |
+         | 11) Post-check enforcement                                           |
+         |     - references present + valid (date_id + paragraph range)         |
+         |     - format compliance                                              |
+         |     - mismatch -> fixed refusal                                      |
+         |                                                                      |
+         +----------------------------------------------------------------------+
+                                        |
+                                        v
+                         +--------------+--------------+
+                         |     Answer + References     |
+                         | inline refs + refs block    |
+                         +-----------------------------+
+
+---
+
+## 14) Intentionally undecided (must remain configurable)
+
+- Exact embedding model ID
+- Exact generator model ID
+- Exact reranker model ID
+- Final vector store choice (FAISS baseline; optional managed DB later)
+
+These remain placeholders until evaluation is complete.

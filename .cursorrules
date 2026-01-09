@@ -34,9 +34,15 @@ This API is the *only* AI endpoint called by the web app (Next.js + Supabase).
 
 ### 1.2 Canonical reference system (LOCKED)
 - Each sermon has a unique **date_id** (no duplicates across the corpus).
-- date_id format: `dd-mm-yy--<T>` where `<T>` ∈ `{M, E}`:
-  - `M` = morning
-  - `E` = evening
+- date_id format:
+  - `dd-mm-yy<T>` when multiple sermons on same day, where `<T>` ∈ `{S, M, A, E, B, X}`:
+    - `S` = Sunday School
+    - `M` = Morning
+    - `A` = Afternoon
+    - `E` = Evening
+    - `B` = Breakfast Sermon
+    - `X` = Extras
+  - `dd-mm-yy` when single sermon on that day (no suffix)
 - References must always include:
   - `date_id`
   - paragraph number(s) (`paragraph_start`, `paragraph_end`)
@@ -222,7 +228,7 @@ System prompt must guide the model to:
 - If context does not support the answer, output the fixed refusal message.
 - Never answer generic questions unrelated to Branham sermons.
 - Always include references:
-  - inline references when appropriate (e.g., `[47-0412--M: ¶2–¶3]`)
+  - inline references when appropriate (e.g., `[47-0412M: ¶2–¶3]`)
   - plus a consolidated references list at end
 
 Important: Server-side post-check must enforce the contract; do not rely on prompt alone.
@@ -302,7 +308,7 @@ Response fields:
 ## 11) Preferred reference rendering
 
 - Inline references in the answer when relevant:
-  - Example: `... (see [47-0412--M: ¶2–¶3])`
+  - Example: `... (see [47-0412M: ¶2–¶3])`
 - References block at end (consolidated):
   - Each item includes date_id + paragraph range + optionally title.
 

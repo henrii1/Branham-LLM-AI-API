@@ -19,6 +19,15 @@ uv sync --extra postgres     # PostgreSQL support
 uv sync --all-extras         # All extras
 ```
 
+### SQLite Setup
+
+**No additional installation required:**
+- `sqlite3` is built into Python 3.12+
+- `aiosqlite` is included in main dependencies (async support)
+- `sqlite-utils` is included in dev dependencies (CLI tools)
+
+SQLite database file will be stored in `data/processed/chunks.sqlite` and deployed with the API.
+
 ## Activate Environment
 
 ```bash

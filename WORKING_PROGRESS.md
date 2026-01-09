@@ -56,9 +56,17 @@ Succinct log of development progress.
 
 ---
 
+## 2025-01-09
+
+### Dataset Acquisition
+- ✅ Created PDF download script (`datasets/ingest/download_pdfs.py`) with retry logic, rate limiting, and resume capability
+- ✅ Downloaded English sermon corpus from branham.org (1947-1965) - test verified, ready for full download
+
+---
+
 ## Status Summary
 
-**Completed**: Environment setup, project scaffolding, API skeleton, configuration, documentation
-**Next**: Dataset preparation → Retrieval implementation → RAG pipeline → Model loaders → Training
-**Progress**: Foundation complete, ready for implementation
+**Completed**: Environment setup, project scaffolding, API skeleton, configuration, documentation, data download script
+**Next**: Parse PDFs → Build chunks → Build BM25 index → Build FAISS index → Training data preparation
+**Progress**: Foundation complete, data acquisition ready, moving to parsing pipeline
 

@@ -61,6 +61,7 @@ data/
 datasets/raw/
 *.parquet
 *.arrow
+*.pdf
 
 # Logs
 *.log

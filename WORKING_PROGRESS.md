@@ -64,9 +64,17 @@ Succinct log of development progress.
 
 ---
 
+## 2025-01-10
+
+### PDF Parsing & Paragraph Extraction
+- ✅ Created `parse_to_paragraphs.py` with PyMuPDF for clean text extraction, VGR paragraph number detection, page header/footer removal, copyright filtering
+- ✅ Processed 1,203 sermons → 207,061 paragraphs into `chunks.sqlite` | No duplicates, no unwanted text, avg 172 para/sermon | Date range: 47-0412 to 65-1212
+
+---
+
 ## Status Summary
 
-**Completed**: Environment setup, project scaffolding, API skeleton, configuration, documentation, data download script
-**Next**: Parse PDFs → Build chunks → Build BM25 index → Build FAISS index → Training data preparation
-**Progress**: Foundation complete, data acquisition ready, moving to parsing pipeline
+**Completed**: Environment setup, project scaffolding, API skeleton, configuration, documentation, PDF download, paragraph extraction to SQLite
+**Next**: Build chunks → Build BM25 index → Build FAISS index → Training data preparation
+**Progress**: Foundation complete, canonical paragraph database ready for chunking pipeline
 

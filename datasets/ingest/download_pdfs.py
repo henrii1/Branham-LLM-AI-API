@@ -139,16 +139,29 @@ DATE_ID_RE = re.compile(r"\b\d{2}-\d{4}[SMABEX]?\b")
 def discover_date_ids_for_year(yy: int) -> list[str]:
     """
     Fetch https://branham.org/messageaudio/{yy} and extract date_ids
-    Returns sorted list of unique date_ids
+    Returns sorted list of unique date_ids that match the target year
     """
     url = messageaudio_year_url(yy)
     print(f"  Fetching year page: {url}")
     
     try:
         html = http_get(url)
-        ids = sorted(set(DATE_ID_RE.findall(html)))
-        print(f"  Found {len(ids)} sermons for year {yy_to_yyyy(yy)}")
-        return ids
+        all_ids = sorted(set(DATE_ID_RE.findall(html)))
+        
+        # Filter to only date_ids that actually match this year
+        # date_id format: yy-mmdd<T> or yy-mmdd
+        # Example: 47-0412M -> year is 47 (1947)
+        filtered_ids = []
+        for date_id in all_ids:
+            # Extract year portion (first 2 digits)
+            id_yy = int(date_id[:2])
+            if id_yy == yy:
+                filtered_ids.append(date_id)
+            else:
+                print(f"  [SKIP] {date_id} - belongs to year {yy_to_yyyy(id_yy)}, not {yy_to_yyyy(yy)}")
+        
+        print(f"  Found {len(filtered_ids)} sermons for year {yy_to_yyyy(yy)} (filtered from {len(all_ids)} total)")
+        return filtered_ids
     except Exception as e:
         print(f"  [ERROR] Failed to fetch year {yy}: {e}")
         return []
@@ -411,4 +424,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 

@@ -226,17 +226,6 @@ These are stored as separate rows in the `paragraphs` table but still part of th
 
 ### 5.5 Optional paragraph markers inside chunk text
 
-Chunks **MAY** render paragraphs with markers for LLM clarity:
-
-```
-¶2 Then Brother Branham said...
-¶3 And the Angel of the Lord appeared...
-```
-
-This helps the LLM understand structure, but **references are always driven by metadata** (not by parsing markers).
-
-### 5.6 No overlap
-
 Chunks never overlap. Each paragraph belongs to exactly one chunk.
 
 ---

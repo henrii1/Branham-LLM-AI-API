@@ -472,3 +472,15 @@ model-api/
 - Final vector store choice (FAISS baseline; optional managed DB later)
 
 These remain placeholders until evaluation is complete.
+
+---
+
+## 15) Deployment note: model weights (safetensors) are NOT committed to git
+
+- **Do not commit** model weights (`*.safetensors`, tokenizer assets, etc.) to git (even with Git LFS).
+- **Production deployment must ship with weights already on disk** for fastest startup and to avoid runtime network dependency.
+- Preferred approach: **container image layer prefetch** using Hugging Face cache:
+  - During image build, download the embedding model snapshot into a directory inside the image (example: `/.hf-cache`).
+  - At runtime, set `HF_HOME=/.hf-cache` (or equivalent) so `transformers` loads from disk.
+  - In production, configure model loading with **local-only** mode (`local_files_only=true`) so the service fails fast if weights are missing.
+- Index artifacts (`bm25.index`, `faiss.index`, `faiss_id_map.jsonl`, `faiss_meta.json`, `chunks.sqlite`) ARE part of the runtime bundle and should be deployed with the API.

@@ -305,6 +305,10 @@ SELECT chunk_id, text FROM chunks;
 - Use lightweight BM25 library (e.g., `rank-bm25` in Python)
 - Serialize index
 
+**BM25 preprocessing (v1 default)**:
+- Deterministic normalization + whitespace tokenization
+- **Stopword removal ON** (can be disabled via config/CLI for quote-intent evaluation)
+
 **Output**: `bm25.index` (`.pkl` or custom binary format)
 
 ---

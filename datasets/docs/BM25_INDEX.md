@@ -58,8 +58,9 @@ If chunk text contains `¶N` markers:
 
 ### Stopwords and Stemming
 
-- **Default**: NO stemming, NO stopword removal (preserves quote-intent fidelity)
-- Optionally allow stopword removal via config (OFF by default)
+- **Default (v1)**: NO stemming, **stopword removal ON** (improves speed and reduces index size)
+- Note: If retrieval quality regresses on quote-intent queries, we can disable stopword removal
+  for BM25 (or build a secondary “keep-stopwords” BM25 index used only for quote-intent).
 
 ---
 
@@ -77,7 +78,7 @@ BM25_NORMALIZE: true              # Apply preprocessing pipeline
 ### Optional Configuration
 
 ```yaml
-BM25_REMOVE_STOPWORDS: false      # Default: false
+BM25_REMOVE_STOPWORDS: true       # Default: true
 BM25_STEM: false                  # Default: false
 ```
 
@@ -154,7 +155,7 @@ Single binary file containing:
     "unicode_form": "NFKC",
     "lowercase": true,
     "tokenizer": "whitespace",
-    "remove_stopwords": false,
+    "remove_stopwords": true,
     "stemming": false
   },
   "corpus_hash": "sha256:...",

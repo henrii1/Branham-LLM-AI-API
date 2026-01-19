@@ -72,6 +72,16 @@ Succinct log of development progress.
 
 ---
 
+## 2026-01-17
+
+### Stages 1–4 (DATA_FORMAT.md) — short summary
+- ✅ **Stage 1**: Canonical paragraphs in SQLite (`data/processed/chunks.sqlite`)
+- ✅ **Stage 2**: Deterministic chunks built in SQLite (`chunks` table)
+- ✅ **Stage 3**: BM25 build pipeline implemented (`scripts/build_bm25_index.py` → `data/indices/bm25.index`)
+- ✅ **Stage 4**: Dense embedding + FAISS build pipeline implemented (`scripts/build_faiss_index.py` → `data/indices/faiss.index` + `faiss_id_map.jsonl` + `faiss_meta.json`)
+
+---
+
 ## Status Summary
 
 **Completed**: Environment setup, project scaffolding, API skeleton, configuration, documentation, PDF download, paragraph extraction to SQLite

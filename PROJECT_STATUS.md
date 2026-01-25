@@ -1,19 +1,22 @@
 # Project Status
 
-## ✅ Repository Structure Created
+## V1 Architecture (January 2026)
 
-The complete repository structure has been successfully created following `.cursorrules` Section 12.
+The project is being built as a **RAG-first system** with the following V1 architecture:
 
-### Structure Verification
+| Component   | Model                        | Serving       |
+|-------------|------------------------------|---------------|
+| Embedding   | `Qwen/Qwen3-Embedding-0.6B`  | vLLM          |
+| Reranker    | `Qwen/Qwen3-Reranker-0.6B`   | vLLM          |
+| Generation  | External API (configurable)  | LiteLLM       |
 
-```bash
-✓ API imports successfully
-✓ Device utilities work. Default device: mps
-```
+See `.cursor/rules/design_spec.md` for complete architecture details.
 
-## 📁 What's Been Created
+---
 
-### Core Infrastructure
+## ✅ Completed
+
+### Repository Structure
 - ✅ Complete directory structure (24 directories)
 - ✅ All Python package `__init__.py` files
 - ✅ Configuration system (default/dev/prod YAML files)
@@ -27,173 +30,96 @@ The complete repository structure has been successfully created following `.curs
 - ✅ Development server script (`scripts/run_dev.sh`)
 
 ### Documentation
-- ✅ DATA_FORMAT.md - Complete data format specification
-- ✅ TRAINING_GUIDE.md - Training workflow documentation
-- ✅ REPOSITORY.md - Full structure documentation
-- ✅ DEPENDENCIES.md - Complete package list
-- ✅ SETUP_COMPLETE.md - Setup instructions
+- ✅ `.cursor/rules/design_spec.md` - Complete V1 architecture specification
+- ✅ `DATA_FORMAT.md` - Data format specification
+- ✅ `BM25_INDEX.md` - BM25 build specification
+- ✅ `DENSE_RETRIEVAL.md` - Dense retrieval specification (updated for Qwen3-Embedding)
+- ✅ `TRAINING_GUIDE.md` - Training workflow documentation (future)
 
-### Test Structure
-- ✅ Test stubs for:
-  - Chunking logic
-  - Fusion/deduplication
-  - Post-check enforcement
+### Data Pipeline (Stages 1-3)
+- ✅ **Stage 0**: PDF download script with retry logic
+- ✅ **Stage 1**: Canonical paragraphs in SQLite (207,061 paragraphs from 1,203 sermons)
+- ✅ **Stage 2**: Deterministic chunks built in SQLite
+- ✅ **Stage 3**: BM25 index built (`data/indices/bm25.index`)
 
-## 📊 Directory Count
+### Stage 4 (Partial - Needs Rebuild)
+- ✅ Dense embedding + FAISS infrastructure implemented
+- 🔄 **REBUILD REQUIRED**: Change embedding model from jina-v3 to Qwen3-Embedding-0.6B
 
-```
-24 directories created:
-├── config/
-├── data/
-├── datasets/ (ingest, export, docs)
-├── indices/
-├── models/adapters/
-├── scripts/
-├── src/branham_model_api/ (api, core, models, retrieval, utils)
-├── tests/
-└── training/ (continued_pretrain, instruction_tune, eval, docs)
-```
+---
 
-## 🎯 Implementation Alignment with `.cursorrules`
+## 🚧 In Progress
 
-### Section 0: Non-negotiables ✅
-- Python-first implementation
-- Configurable models (no hard-coded choices)
-- MPS/CUDA/CPU device support
-- Concurrency-ready structure
+### Stage 4 Rebuild
+- [ ] Update embedder for `Qwen/Qwen3-Embedding-0.6B`
+- [ ] Rebuild FAISS index with new embeddings
+- [ ] Validate with benchmark script
 
-### Section 1-2: Domain & Goals ✅
-- Canonical reference system (date_id format)
-- Sermon structure awareness
-- Latency target awareness
+---
 
-### Section 3: Technology Stack ✅
-- FastAPI + Uvicorn + Gunicorn
-- PyTorch + Transformers + PEFT
-- BM25 + FAISS retrieval stack
-- SQLite text store (Redis/Postgres optional)
+## 📋 Next Steps (V1)
 
-### Section 5: Chunking ✅
-- Structure prepared for paragraph-aware chunking
-- ~350 token budget design
-- Sentence boundary splitting support
+### Phase 1: Complete Retrieval Infrastructure
+1. Rebuild Stage 4 (FAISS index) with Qwen3-Embedding
+2. Implement vLLM serving for embedding model (online query embedding)
+3. Implement vLLM serving for reranker (conditional)
+4. Implement chunk store utilities
 
-### Section 6: Pipeline Flow ✅
-- 14-step pipeline structure defined
-- Early BM25 guard concept
-- Conditional reranker design
-- Post-check enforcement planned
+### Phase 2: RAG Pipeline
+1. Implement fusion logic (BM25 + dense)
+2. Implement retrieval signals (flatness, overlap, confidence)
+3. Implement date_id collation (sermon-level grouping)
+4. Implement context expansion (±1/±2 chunks)
+5. Implement post-check enforcement
 
-### Section 8: Training ✅
-- Continued pretraining directory
-- Instruction tuning directory
-- Training guide documentation
+### Phase 3: Generation Integration
+1. Implement LiteLLM client
+2. Implement API key rotation for rate limiting
+3. Implement prompt building
+4. Implement Serper tool (optional, gated)
 
-### Section 10: API Contract ✅
-- POST /chat endpoint with proper schema
-- GET /health endpoint
-- Request/Response models match specification
+### Phase 4: API Integration
+1. Wire up `/chat` endpoint with full pipeline
+2. Implement streaming (SSE)
+3. Implement health checks for all services
 
-### Section 12: Repository Layout ✅
-- **100% match** with specified structure
+---
 
-## 🚀 Ready to Start Development
+## ⏳ Future (NOT V1)
 
-### Quick Start
+- Self-hosted generation model via vLLM
+- LoRA/QLoRA fine-tuning
+- Caching layers
+- Multi-GPU inference
 
-1. **Start the API** (returns basic response):
-   ```bash
-   ./scripts/run_dev.sh
-   # or
-   uv run uvicorn branham_model_api.api.main:app --reload
-   ```
+---
 
-2. **Test API endpoints**:
-   ```bash
-   # Health check
-   curl http://localhost:8000/api/health
-   
-   # API docs (Swagger UI)
-   open http://localhost:8000/docs
-   ```
-
-3. **Run tests**:
-   ```bash
-   uv run pytest
-   ```
-
-4. **Check device**:
-   ```bash
-   uv run python -c "from branham_model_api.utils.device import get_device; print(get_device())"
-   ```
-
-## 📝 Next Implementation Steps
-
-### Phase 1: Dataset Preparation
-1. Implement `datasets/ingest/parse_sermons.py`
-2. Implement `datasets/ingest/normalize.py`
-3. Implement `datasets/ingest/build_chunks.py` (Section 5.1)
-4. Create sample sermon chunks
-
-### Phase 2: Retrieval
-1. Implement `src/branham_model_api/retrieval/store/chunk_store.py`
-2. Implement `src/branham_model_api/retrieval/bm25/index.py`
-3. Implement `src/branham_model_api/retrieval/dense/embedder.py`
-4. Implement `src/branham_model_api/retrieval/dense/index_faiss.py`
-5. Create `scripts/build_bm25_index.py`
-6. Create `scripts/build_faiss_index.py`
-
-### Phase 3: RAG Pipeline
-1. Implement `src/branham_model_api/core/pipeline/fusion.py`
-2. Implement `src/branham_model_api/core/pipeline/signals.py`
-3. Implement `src/branham_model_api/core/pipeline/rerank.py`
-4. Implement `src/branham_model_api/core/pipeline/expansion.py`
-5. Implement `src/branham_model_api/core/pipeline/postcheck.py`
-6. Implement `src/branham_model_api/core/pipeline/rag_pipeline.py`
-
-### Phase 4: Models
-1. Implement `src/branham_model_api/models/generator/load.py`
-2. Implement `src/branham_model_api/models/generator/infer.py`
-3. Implement `src/branham_model_api/models/reranker/load.py`
-4. Implement `src/branham_model_api/models/reranker/infer.py`
-
-### Phase 5: Training
-1. Create training datasets
-2. Implement `training/continued_pretrain/train_lora.py`
-3. Implement `training/instruction_tune/build_qa.py`
-4. Implement `training/instruction_tune/train_qa_lora.py`
-5. Implement evaluation scripts
-
-### Phase 6: Testing & Refinement
-1. Implement all test cases
-2. Performance optimization
-3. Latency profiling
-4. End-to-end integration tests
-
-## 🎨 Current State
+## 📊 Current State
 
 ```
 ✅ Project scaffolding: 100%
 ✅ Configuration: 100%
 ✅ API skeleton: 100%
 ✅ Documentation: 100%
-🚧 Implementation: 5% (device utils + schemas)
-⏳ Retrieval: 0%
-⏳ RAG Pipeline: 0%
-⏳ Models: 0%
-⏳ Training: 0%
-⏳ Testing: 0%
+✅ Data ingestion (Stages 1-3): 100%
+🔄 Dense retrieval (Stage 4): 80% (needs rebuild with Qwen model)
+⏳ vLLM serving setup: 0%
+⏳ RAG Pipeline: 10%
+⏳ LiteLLM integration: 0%
+⏳ End-to-end testing: 0%
 ```
+
+---
 
 ## 📚 Key Files to Reference
 
-- `.cursorrules` - Complete implementation guide
-- `REPOSITORY.md` - Structure documentation
+- `.cursor/rules/design_spec.md` - Complete V1 implementation guide
 - `datasets/docs/DATA_FORMAT.md` - Data specifications
-- `training/docs/TRAINING_GUIDE.md` - Training workflow
+- `datasets/docs/DENSE_RETRIEVAL.md` - Dense retrieval (Qwen3-Embedding)
+- `datasets/docs/BM25_INDEX.md` - BM25 specifications
+- `WORKING_PROGRESS.md` - Detailed progress log
 - `config/default.yaml` - Configuration reference
 
 ---
 
-**The foundation is solid. Ready to build! 🚀**
-
+**Foundation is solid. Stage 4 rebuild in progress. 🚀**

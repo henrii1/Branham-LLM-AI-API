@@ -9,46 +9,63 @@
 
 ---
 
-## 4.1 Recommended Starting Embedding Model (Config-Driven)
+## 4.1 V1 Embedding Model (LOCKED)
 
-### Primary Starting Point (Good Default)
+### Primary Model
 
-**Embedding model**: `jinaai/jina-embeddings-v3`
+**Embedding model**: `Qwen/Qwen3-Embedding-0.6B`
 
 **Key capabilities**:
-- Multilingual pretraining (broad language coverage)
-- Long input support (up to 8192 tokens per model docs/marketplace references)
-- Matryoshka Representation Learning (MRL): you can truncate the output embedding dimension while preserving much of the quality
+- Strong multilingual pretraining (broad language coverage)
+- Optimized for retrieval tasks
+- Efficient 0.6B parameter size suitable for low-latency serving
+- Good balance of quality and speed for production use
 
-### Dimensionality Choice (For Faster ANN + Smaller Index)
+### Serving Strategy (V1)
 
-- Default v3 output is 1024 dims, but MRL allows truncation down to smaller dims such as 512.
-- **Starting recommendation**: `DIM=512` (trade-off: faster + smaller index; validate on retrieval eval later)
+**Offline (Index Build)**:
+- Corpus embeddings are generated during the build step.
+- Can use direct HuggingFace model loading or vLLM batch embedding.
+- Output: pre-built `faiss.index` deployed with the API.
+
+**Online (Query Embedding)**:
+- Query embedding served via **vLLM** with embedding-optimized configuration.
+- Tuned for low-latency since only a single query is embedded per request.
+- vLLM handles batching, memory management, and efficient inference.
+
+### Dimensionality
+
+- Use the model's native output dimension (typically 1024 for Qwen3-Embedding).
+- **Do not truncate** unless memory becomes a constraint; evaluate quality impact first.
 
 ### Notes on Tokenization
 
-- jina-embeddings-v3 is based on an XLM-R style stack per marketplace documentation; XLM-R tokenization uses SentencePiece.
-- **Implementation rule**: always load the tokenizer via Hugging Face `AutoTokenizer` for the selected embedding model (do not hardcode tokenizers). The model's tokenizer config will select SentencePiece where appropriate.
+- Qwen3-Embedding uses Qwen's tokenizer (SentencePiece-based).
+- **Implementation rule**: Always load the tokenizer via HuggingFace `AutoTokenizer` for the selected embedding model. Do not hardcode tokenizers.
 
 ---
 
-## 4.2 Alternative Multilingual Embedding Models (Keep in Config)
+## 4.2 Alternative Embedding Models (Keep in Config)
 
 Keep these as evaluated alternatives (model_id is configurable; select via experiments):
 
+### jinaai/jina-embeddings-v3
+- MRL (Matryoshka Representation Learning) support for dimension truncation.
+- Long input support (up to 8192 tokens).
+- Previously evaluated; good fallback option.
+
 ### BAAI/bge-m3
-- Popular multilingual embedding baseline; designed for multi-linguality and retrieval versatility.
+- Popular multilingual embedding baseline.
+- Designed for multi-linguality and retrieval versatility.
 
 ### intfloat/multilingual-e5-large / multilingual-e5-* variants
-- Common multilingual retrieval baselines; widely used in RAG systems. (Discoverable via HF ST listings.)
-
-### Qwen/Qwen3-Embedding-* (0.6B/4B/8B)
-- Modern multilingual embedding family; available as HF embedding models.
+- Common multilingual retrieval baselines.
+- Widely used in RAG systems.
 
 ### Selection Guidance
 
-- Start with `jina-embeddings-v3` at 512 dims because MRL makes dimension reduction straightforward.
-- Validate against `bge-m3` and `multilingual-e5-large` on a small internal retrieval eval set (top-k recall on known sermon queries).
+- **V1 default**: `Qwen/Qwen3-Embedding-0.6B` (balances quality, speed, and vLLM serving compatibility).
+- Validate retrieval quality against alternatives on a small internal eval set (top-k recall on known sermon queries).
 
 ---
 
@@ -65,32 +82,27 @@ SELECT chunk_id, text FROM chunks
 - `faiss.index` (binary FAISS index)
 - `faiss_id_map.jsonl` (row_id -> chunk_id mapping)
 - `faiss_meta.json` (model_id, dim, dtype, normalization, build params, corpus hash)
-- optional: `embeddings.memmap` (float16 embeddings for rebuild/debug; not required for serving)
+- optional: `embeddings.npy` (float32 embeddings for rebuild/debug; not required for serving)
 
 ### Key Rules
 
 - Use the **SAME chunk records as BM25** (documents = chunks, keyed by chunk_id).
 - Store **NO embeddings inside chunks.sqlite**.
 - Keep all embedding model choices configurable:
-  - `EMBED_MODEL_ID` (e.g., `jinaai/jina-embeddings-v3`)
-  - `EMBED_DIM` (e.g., 512 using MRL truncation)
+  - `EMBED_MODEL_ID` (e.g., `Qwen/Qwen3-Embedding-0.6B`)
+  - `EMBED_DIM` (model's native dimension; truncation optional)
   - `EMBED_DTYPE` (`fp16`/`bf16`/`fp32`; fp16 recommended on GPU)
   - `EMBED_BATCH_SIZE` (tune per hardware)
-  - `EMBED_MAX_LENGTH` (respect model limits; v3 supports long inputs per docs, but set an explicit cap)
+  - `EMBED_MAX_LENGTH` (respect model limits)
 
-### Normalization & Similarity (Recommended)
+### Normalization & Similarity (Required)
 
 - Normalize embeddings to unit length and use cosine similarity.
-- In FAISS, cosine similarity is typically implemented as inner product over normalized vectors.
-
-### MRL Truncation (jina v3)
-
-- Generate full embeddings then truncate to first `EMBED_DIM` dims (e.g., 512).
-- This is aligned with MRL usage guidance and preserves performance better than arbitrary projection.
+- In FAISS, cosine similarity is implemented as inner product over normalized vectors.
 
 ### Tokenizer
 
-- Use `AutoTokenizer.from_pretrained(EMBED_MODEL_ID)` to ensure SentencePiece is used when required by the model. (Do not hardcode.)
+- Use `AutoTokenizer.from_pretrained(EMBED_MODEL_ID)` to load the correct tokenizer.
 
 ---
 
@@ -113,8 +125,8 @@ SELECT chunk_id, text FROM chunks
 
 ### Practical Guidance for 1100 Sermons
 
-- Expect total chunks to be "tens of thousands" depending on chunk size; HNSW is often a good starting ANN option.
-- Use `DIM=512` to keep index smaller and searches faster.
+- Expect total chunks to be "tens of thousands" depending on chunk size.
+- HNSW is often a good starting ANN option for this corpus size.
 
 ---
 
@@ -122,14 +134,14 @@ SELECT chunk_id, text FROM chunks
 
 ### Intent
 
-- Corpus is English-only in v1.
+- Corpus is English-only in V1.
 - Queries may be multilingual.
-- Embeddings enable cross-lingual retrieval: user-language query -> English chunk hits.
+- Embeddings enable cross-lingual retrieval: user-language query → English chunk hits.
 
-### Generation Model Compatibility (Llama / Qwen2.5-7B-Instruct)
+### Generation Model Compatibility
 
 - The embedder and generator are decoupled.
-- Any generator (e.g., Llama or Qwen2.5 Instruct) can consume retrieved English context and, via system prompt + user_language, produce the answer in the user's language.
+- Generator (via LiteLLM → external API) consumes retrieved English context and produces the answer in the user's language.
 - Key enforcement remains the same: strict grounding + references; refuse if evidence is insufficient.
 
 ---
@@ -149,9 +161,8 @@ SELECT chunk_id, text FROM chunks
 
 ### Step 3: Produce Embedding Vectors
 
-- Pooling strategy must be explicitly defined by the embedding model's recommended usage (do not invent pooling).
+- Pooling strategy: Use model's recommended approach (typically mean pooling for Qwen3-Embedding).
 - Normalize vectors (unit length).
-- If model supports MRL truncation, truncate to `EMBED_DIM` (e.g., 512).
 
 ### Step 4: Build FAISS Index
 
@@ -172,12 +183,35 @@ SELECT chunk_id, text FROM chunks
 
 ### Step 7: Serving-Time Contract
 
-- Dense retrieval returns faiss row ids -> chunk_ids via mapping -> chunk records via `chunks.sqlite`
+- Dense retrieval returns faiss row ids → chunk_ids via mapping → chunk records via `chunks.sqlite`
 - Dedup and fusion are chunk_id-based (same as BM25)
 
 ---
 
-## 4.7 Notes for Later Optimization (Do Not Block v1)
+## 4.7 vLLM Serving Configuration (V1 Online)
+
+### Embedding vLLM Instance
+
+The embedding model is served via vLLM for online query embedding:
+
+```yaml
+# vLLM embedding config (conceptual)
+model: "Qwen/Qwen3-Embedding-0.6B"
+task: "embed"  # or equivalent vLLM embedding mode
+dtype: "float16"
+max_model_len: 1024  # typical query length; tune as needed
+# Low-latency config for single-query embedding
+```
+
+### Key Points
+
+- **Single-query optimized**: Queries are embedded one at a time (or small batches).
+- **Low latency**: Config tuned for fast response, not throughput.
+- **Separate from reranker**: Embedding vLLM instance is separate from reranker vLLM instance.
+
+---
+
+## 4.8 Notes for Later Optimization (Do Not Block V1)
 
 - If you later adopt a managed vector DB, keep the same embedding contract (chunk_id as primary key).
 - If you later want faster embeddings on NVIDIA, consider optional acceleration flags (`optimum`, `torch.compile`, etc.) but gate them behind config.
@@ -191,11 +225,11 @@ SELECT chunk_id, text FROM chunks
 
 ```yaml
 # Embedding Model
-EMBED_MODEL_ID: "jinaai/jina-embeddings-v3"  # or alternative from 4.2
-EMBED_DIM: 512                                # MRL truncation target
+EMBED_MODEL_ID: "Qwen/Qwen3-Embedding-0.6B"  # V1 default
+EMBED_DIM: null                               # Use model's native dimension
 EMBED_DTYPE: "fp16"                           # fp16/bf16/fp32
 EMBED_BATCH_SIZE: 32                          # tune per hardware
-EMBED_MAX_LENGTH: 8192                        # respect model limits
+EMBED_MAX_LENGTH: 1024                         # typical max for queries
 
 # FAISS Index
 FAISS_INDEX_TYPE: "flatip"                    # flatip/hnsw/ivf_pq
@@ -224,14 +258,14 @@ DEVICE_PREFERENCE: "auto"                     # mps/cuda/cpu/auto
 
 ```json
 {
-  "model_id": "jinaai/jina-embeddings-v3",
-  "dim": 512,
+  "model_id": "Qwen/Qwen3-Embedding-0.6B",
+  "dim": 1024,
   "dtype": "fp16",
   "normalization": "unit_length",
   "index_type": "IndexFlatIP",
   "index_params": {},
   "corpus_hash": "sha256:...",
-  "build_timestamp": "2024-01-15T10:30:00Z",
+  "build_timestamp": "2026-01-25T10:30:00Z",
   "total_chunks": 55000
 }
 ```
@@ -240,9 +274,9 @@ DEVICE_PREFERENCE: "auto"                     # mps/cuda/cpu/auto
 
 ## Integration with Retrieval Pipeline
 
-### Dense Retrieval Flow
+### Dense Retrieval Flow (V1)
 
-1. User query (any language) → embedder → query vector
+1. User query (any language) → vLLM (Qwen3-Embedding-0.6B) → query vector
 2. Query vector → FAISS search → top-K faiss row ids
 3. Row ids → `faiss_id_map.jsonl` → chunk_ids
 4. Chunk_ids → `chunks.sqlite` → chunk records
@@ -257,5 +291,24 @@ DEVICE_PREFERENCE: "auto"                     # mps/cuda/cpu/auto
 
 ---
 
-**End of specification.**
+## Reranker (Conditional)
 
+### Model
+
+- `Qwen/Qwen3-Reranker-0.6B` served via separate vLLM instance.
+
+### When Invoked
+
+- Only when retrieval signals indicate ambiguity or low confidence.
+- Scope: small top-K window (typically 10–20 candidates).
+
+### Integration
+
+- Reranker scores are used to re-order candidates before fusion/selection.
+- Does not replace dense retrieval; it refines the ranking.
+
+See main design spec for full reranker flow.
+
+---
+
+**End of specification.**

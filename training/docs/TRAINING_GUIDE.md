@@ -1,8 +1,12 @@
 # Training Guide
 
+> **Note**: This guide is for **future versions** of the Branham Model API. 
+> **V1 uses external generation APIs via LiteLLM** and does not require self-hosted model training.
+> Training will be implemented when API costs ≈ hosting costs.
+
 ## Overview
 
-This guide covers training LoRA/QLoRA adapters for the Branham Model API (Section 8).
+This guide covers training LoRA/QLoRA adapters for the Branham Model API (see `.cursor/rules/design_spec.md` Section 13).
 
 ## Training Stages
 

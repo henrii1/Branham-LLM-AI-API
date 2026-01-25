@@ -321,21 +321,27 @@ SELECT chunk_id, text FROM chunks;
 SELECT chunk_id, text FROM chunks;
 ```
 
+**Embedding Model (V1)**: `Qwen/Qwen3-Embedding-0.6B`
+
 **Process**:
-1. Generate embeddings using configured embedding model
-2. Build FAISS index from embeddings
-3. Assign FAISS row id (0 to N-1, sequential)
-4. Write mapping: `faiss_id → chunk_id`
+1. Generate embeddings using configured embedding model (V1: Qwen3-Embedding-0.6B)
+2. Normalize embeddings to unit length (for cosine similarity via inner product)
+3. Build FAISS index from embeddings
+4. Assign FAISS row id (0 to N-1, sequential)
+5. Write mapping: `faiss_id → chunk_id`
 
 **Output**:
 - `faiss.index`
 - `faiss_id_map.jsonl`
+- `faiss_meta.json`
 
 Each row in `faiss_id_map.jsonl`:
 
 ```json
 { "faiss_id": 12345, "chunk_id": "47-0412M_chunk_3" }
 ```
+
+**Note**: See `datasets/docs/DENSE_RETRIEVAL.md` for full embedding and FAISS configuration details.
 
 ---
 

@@ -52,7 +52,15 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ### Project Structure
 
-See `.cursorrules` for the complete architecture and repository layout.
+See `.cursor/rules/design_spec.md` for the complete V1 architecture and repository layout.
+
+### V1 Architecture Summary
+
+| Component   | Model                        | Serving       |
+|-------------|------------------------------|---------------|
+| Embedding   | `Qwen/Qwen3-Embedding-0.6B`  | vLLM          |
+| Reranker    | `Qwen/Qwen3-Reranker-0.6B`   | vLLM          |
+| Generation  | External API (configurable)  | LiteLLM       |
 
 ### Dependencies
 

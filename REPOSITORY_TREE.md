@@ -1,12 +1,20 @@
 # Repository Structure
 
-Complete directory layout as per `.cursorrules` Section 12.
+Complete directory layout as per `.cursor/rules/design_spec.md` Section 17.
+
+## V1 Architecture Summary
+
+| Component   | Model                        | Serving       |
+|-------------|------------------------------|---------------|
+| Embedding   | `Qwen/Qwen3-Embedding-0.6B`  | vLLM          |
+| Reranker    | `Qwen/Qwen3-Reranker-0.6B`   | vLLM          |
+| Generation  | External API (configurable)  | LiteLLM       |
 
 ## Project Root
 
 ```
 Branham-LLM-AI-API/
-├── .cursorrules                  # Development rules & architecture guide
+├── .cursor/rules/design_spec.md  # V1 architecture & implementation guide
 ├── .gitignore                    # Git ignore patterns
 ├── .python-version               # Python version (3.12)
 ├── pyproject.toml                # Project dependencies & configuration
@@ -213,28 +221,36 @@ Branham-LLM-AI-API/
 - API skeleton (schemas, routes)
 - Device utilities
 - System prompt template
-- Documentation (DATA_FORMAT, TRAINING_GUIDE)
+- Documentation (DATA_FORMAT, BM25_INDEX, DENSE_RETRIEVAL, TRAINING_GUIDE)
 - Test stubs
+- Data ingestion pipeline (Stages 1-3)
+- BM25 index build
 
-🚧 **TODO**:
-- All pipeline components
-- Retrieval implementations
-- Model loaders
-- Dataset preparation
+🔄 **In Progress**:
+- Stage 4 rebuild (FAISS index with Qwen3-Embedding-0.6B)
+
+🚧 **TODO (V1)**:
+- vLLM serving for embedding and reranker
+- LiteLLM integration for generation
+- RAG pipeline components
+- Sermon-level (date_id) collation
+- Serper tool integration (optional)
+
+⏳ **Future (NOT V1)**:
+- Self-hosted generation model
+- LoRA/QLoRA fine-tuning
 - Training scripts
-- Index builders
-- Remaining tests
+- Caching layers
 
 ## Next Steps
 
-1. Implement chunking logic (`datasets/ingest/build_chunks.py`)
-2. Create dataset preparation pipeline
-3. Build indices (`scripts/build_bm25_index.py`, `scripts/build_faiss_index.py`)
-4. Implement retrieval components
-5. Build RAG pipeline
-6. Add model loaders
-7. Implement training scripts
-8. Write comprehensive tests
+1. Rebuild Stage 4 (FAISS index) with `Qwen/Qwen3-Embedding-0.6B`
+2. Implement vLLM serving for embedding model
+3. Implement vLLM serving for reranker (conditional)
+4. Implement LiteLLM client for generation
+5. Build RAG pipeline with date_id collation
+6. Implement post-check enforcement
+7. Wire up `/chat` endpoint
 
-See `.cursorrules` for detailed implementation requirements!
+See `.cursor/rules/design_spec.md` for detailed V1 implementation requirements!
 

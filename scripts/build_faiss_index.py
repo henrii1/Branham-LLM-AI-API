@@ -113,8 +113,28 @@ def main() -> None:
         "--pooling",
         type=str,
         default="mean",
-        choices=["mean", "cls", "pooler"],
-        help="Pooling strategy (default: mean).",
+        choices=["mean", "cls", "pooler", "last_token"],
+        help="Pooling strategy. Use 'last_token' for Qwen3-Embedding (default: mean).",
+    )
+    parser.add_argument(
+        "--padding-side",
+        type=str,
+        default=None,
+        choices=["left", "right"],
+        help="Tokenizer padding side. Use 'left' for Qwen3-Embedding. Auto-set if pooling=last_token.",
+    )
+    parser.add_argument(
+        "--query-instruction-template",
+        type=str,
+        default=None,
+        help="Instruction template for queries (e.g., 'Instruct: {task}\\nQuery:{query}'). "
+             "Used by Qwen3-Embedding. Not applied during doc embedding.",
+    )
+    parser.add_argument(
+        "--query-task-description",
+        type=str,
+        default="Given a question about William Branham's teachings or sermons, retrieve relevant sermon passages that answer the query",
+        help="Task description for instruction template (replaces {task}).",
     )
     parser.add_argument(
         "--no-normalize",
@@ -177,7 +197,7 @@ def main() -> None:
     model_id = args.model_id
     if not model_id:
         print(
-            "Error: embedding model id not provided. Pass --model-id (e.g., jinaai/jina-embeddings-v3).",
+            "Error: embedding model id not provided. Pass --model-id (e.g., Qwen/Qwen3-Embedding-0.6B).",
             file=sys.stderr,
         )
         sys.exit(2)
@@ -200,6 +220,9 @@ def main() -> None:
         query_prefix=str(args.query_prefix or ""),
         doc_prefix=str(args.doc_prefix or ""),
         device_preference=str(args.device),
+        padding_side=args.padding_side,  # type: ignore[arg-type]
+        query_instruction_template=args.query_instruction_template,
+        query_task_description=str(args.query_task_description),
     )
     faiss_cfg = FaissBuildConfig(
         index_type=str(args.index_type),  # type: ignore[arg-type]
@@ -265,9 +288,12 @@ def main() -> None:
         "dtype": embed_cfg.dtype,
         "normalization": "unit_length" if embed_cfg.normalize else "none",
         "pooling": embed_cfg.pooling,
+        "padding_side": embed_cfg.padding_side or ("left" if embed_cfg.pooling == "last_token" else "right"),
         "max_length": int(embed_cfg.max_length),
         "query_prefix": embed_cfg.query_prefix,
         "doc_prefix": embed_cfg.doc_prefix,
+        "query_instruction_template": embed_cfg.query_instruction_template,
+        "query_task_description": embed_cfg.query_task_description,
         "index_type": faiss_index_type_name(index),
         "index_params": faiss_index_params(faiss_cfg),
         "corpus_hash": f"sha256:{corpus_hasher.hexdigest()}",

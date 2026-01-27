@@ -6,8 +6,11 @@ Goal:
 - Ensure production/deploy images have all required weights/tokenizer/config files on disk
   for fastest startup and to avoid runtime network dependency.
 
-Usage:
-  uv run python scripts/prefetch_hf_model.py --model-id jinaai/jina-embeddings-v3 --target-dir ./.hf-cache
+Usage (single model):
+  uv run python scripts/prefetch_hf_model.py --model-id Qwen/Qwen3-Embedding-0.6B --target-dir ./.hf-cache
+
+Usage (all production models):
+  uv run python scripts/prefetch_hf_model.py --all --target-dir ./.hf-cache
 
 Notes:
 - This downloads a full snapshot (all files) for safety and reproducibility.
@@ -22,11 +25,53 @@ from pathlib import Path
 from huggingface_hub import snapshot_download
 
 
+# Production models for Branham Model API
+PRODUCTION_MODELS = [
+    # Embedding model (Stage 4 - dense retrieval)
+    "Qwen/Qwen3-Embedding-0.6B",
+    # Reranker model (conditional reranking)
+    "Qwen/Qwen3-Reranker-0.6B",
+]
+
+
+def prefetch_model(
+    model_id: str,
+    target_dir: Path,
+    revision: str | None = None,
+    token: str | None = None,
+) -> str:
+    """Download a model snapshot and return the local path."""
+    print(f"\nPrefetching: {model_id}")
+    print(f"  Revision: {revision or '<default>'}")
+
+    local_path = snapshot_download(
+        repo_id=model_id,
+        revision=revision,
+        token=token,
+        local_files_only=False,
+    )
+
+    print(f"  ✓ Downloaded to: {local_path}")
+    return local_path
+
+
 def main() -> None:
     import argparse
 
-    parser = argparse.ArgumentParser(description="Prefetch a Hugging Face model snapshot to disk.")
-    parser.add_argument("--model-id", type=str, required=True, help="HF repo id (e.g., jinaai/jina-embeddings-v3)")
+    parser = argparse.ArgumentParser(
+        description="Prefetch Hugging Face model snapshots to disk."
+    )
+    parser.add_argument(
+        "--model-id",
+        type=str,
+        default=None,
+        help="HF repo id (e.g., Qwen/Qwen3-Embedding-0.6B)",
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Prefetch all production models (embedding + reranker)",
+    )
     parser.add_argument(
         "--revision",
         type=str,
@@ -47,28 +92,39 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    if not args.model_id and not args.all:
+        parser.error("Either --model-id or --all is required")
+
     target_dir = Path(args.target_dir).expanduser().resolve()
     target_dir.mkdir(parents=True, exist_ok=True)
 
     # Ensure all downloads go into this directory (portable for container layers).
     os.environ["HF_HOME"] = str(target_dir)
 
-    print(f"Prefetching: {args.model_id}")
-    print(f"Revision: {args.revision or '<default>'}")
-    print(f"HF_HOME: {target_dir}")
     print("=" * 70)
+    print("HF Model Prefetch")
+    print("=" * 70)
+    print(f"HF_HOME: {target_dir}")
 
-    local_path = snapshot_download(
-        repo_id=str(args.model_id),
-        revision=str(args.revision) if args.revision else None,
-        token=str(args.token) if args.token else None,
-        local_files_only=False,
-    )
+    models_to_fetch = []
+    if args.all:
+        models_to_fetch = PRODUCTION_MODELS
+        print(f"Prefetching all production models ({len(models_to_fetch)} models)")
+    elif args.model_id:
+        models_to_fetch = [args.model_id]
 
-    print("✓ Snapshot downloaded")
-    print(f"Local snapshot path: {local_path}")
+    for model_id in models_to_fetch:
+        prefetch_model(
+            model_id=model_id,
+            target_dir=target_dir,
+            revision=args.revision,
+            token=args.token,
+        )
+
+    print("\n" + "=" * 70)
+    print(f"✓ All models prefetched to: {target_dir}")
+    print("=" * 70)
 
 
 if __name__ == "__main__":
     main()
-

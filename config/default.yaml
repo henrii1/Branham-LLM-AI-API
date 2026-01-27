@@ -17,9 +17,9 @@ api:
 
 # Model Configuration (Configurable - no hard-coded choices)
 models:
-  embedding_model_id: jinaai/jina-embeddings-v3  # Default for now: strong multilingual + fast enough for RAG
-  reranker_model_id: null   # To be configured
-  generator_model_id: null  # To be configured
+  embedding_model_id: Qwen/Qwen3-Embedding-0.6B  # 32k context, 1024 dim, multilingual
+  reranker_model_id: Qwen/Qwen3-Reranker-0.6B    # Paired with embedding model
+  generator_model_id: null  # To be configured (via LiteLLM)
   tokenizer_model_id: null  # To be configured
 
 # Retrieval Configuration
@@ -38,15 +38,20 @@ retrieval:
     top_n: 20
     # Stage 4 / Dense retrieval (datasets/docs/DENSE_RETRIEVAL.md)
     embed:
-      dim: 512
+      # Qwen3-Embedding-0.6B: 32k context, 1024 dim native (supports 32-1024 MRL)
+      dim: 1024            # Native dim; can truncate to 512/256 if needed
       dtype: fp16          # fp16/bf16/fp32
-      batch_size: 32
-      max_length: 8192
-      pooling: mean        # mean/cls/pooler
+      batch_size: 16       # Qwen is heavier than Jina; adjust for memory
+      max_length: 32768    # Full 32k context for query embedding
+      pooling: last_token  # Qwen uses last token pooling (not mean)
+      padding_side: left   # Qwen requires left padding
       normalize: true
       trust_remote_code: true
-      query_prefix: ""     # e.g., "query: " for E5
-      doc_prefix: ""       # e.g., "passage: " for E5
+      query_prefix: ""     # Not used; use query_instruction_template instead
+      doc_prefix: ""       # Documents don't need prefix for Qwen
+      # Qwen instruction format for query embedding
+      query_instruction_template: "Instruct: {task}\nQuery:{query}"
+      query_task_description: "Given a question about William Branham's teachings or sermons, retrieve relevant sermon passages that answer the query"
     faiss:
       index_type: flatip   # flatip/hnsw/ivf_pq
       hnsw_m: 32

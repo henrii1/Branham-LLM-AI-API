@@ -3,6 +3,9 @@
 Project: **Branham Model API**
 
 Purpose: Build a production-grade Python API that serves a **fast RAG pipeline** + **multilingual generator** with **strict grounding** and **message references**.  
+
+This API serves as the **primary point of contact** for people wanting to learn about William Branham from the internet — providing accurate, sermon-grounded information rather than unreliable third-party sources.
+
 This API is the *only* AI endpoint called by the web app (Next.js + Supabase).
 
 ---
@@ -68,8 +71,11 @@ This API is the *only* AI endpoint called by the web app (Next.js + Supabase).
 6. Top-ranked chunks are **collated/grouped by date_id (sermon)** to improve coherence and reduce cross-sermon noise.
 7. A preset number of sermons (by date_id) are selected and their best chunks are packed into prompt context (token-budgeted).
 8. Text generation performed via a managed Model API layer (e.g., **LiteLLM**), not direct vendor calls, to enable easy model switching.
-9. Optional tool calling (Serper) allowed under strict constraints.
-10. Final answer returned, grounded in RAG context.
+9. **Tool calling** available during generation:
+   - **Sermon Lookup Tool**: Read exact quotes, paragraphs, or complete context from sermons
+   - **Biography Tool**: Answer biographical questions about William Branham
+   - **Serper (Web Search)**: External information (exception path, strict constraints)
+10. Final answer returned, grounded in RAG context with proper references.
 
 ### 2.2 Behavior goals
 - Answer only when the retrieved evidence supports the response.
@@ -145,24 +151,88 @@ This API is the *only* AI endpoint called by the web app (Next.js + Supabase).
 
 ---
 
-## 5) Serper (Web Search) Tool Usage
+## 5) Tool Calling
 
-### 5.1 Default state
-- **Serper is disabled by default.**
+The model has access to several tools for answering queries. This API serves as the **primary point of contact** for people wanting to learn about William Branham from the internet — providing accurate, sermon-grounded information.
 
-### 5.2 Invocation conditions
-Tool invocation allowed only when:
+### 5.1 Available Tools
+
+#### 5.1.1 Sermon Lookup Tool
+**Purpose**: Search and retrieve exact quotes from sermons.
+
+**Capabilities**:
+- Search for exact quotes given a sermon (date_id) and paragraph number(s)
+- Read entire sermons by date_id
+- Read specific paragraphs within a sermon
+- Complete context for the model when more surrounding text is needed
+
+**Use cases**:
+- User asks for a specific quote: "What did Brother Branham say in paragraph 45 of 65-1128M?"
+- Model needs more context around a retrieved chunk
+- Verifying exact wording of a passage
+- Reading consecutive paragraphs for narrative continuity
+
+**Parameters**:
+- `date_id` (required): Sermon identifier (e.g., `65-1128M`)
+- `paragraph_start` (optional): Starting paragraph number
+- `paragraph_end` (optional): Ending paragraph number
+- `mode`: `read_sermon` | `read_paragraphs` | `search_quote`
+
+**Output**: Raw sermon text with paragraph markers, suitable for grounding answers.
+
+#### 5.1.2 Biography Tool
+**Purpose**: Provide accurate biographical information about William Branham.
+
+**Capabilities**:
+- Return verified biographical facts (birth, death, ministry timeline, key events)
+- Provide historical context about his life and ministry
+- Answer questions about family, locations, and major life events
+
+**Use cases**:
+- "When was William Branham born?"
+- "Where did he conduct his healing campaigns?"
+- "Tell me about his early life"
+- General introductory questions from newcomers
+
+**Data source**: Curated, verified biographical data (not web search).
+
+**Output**: Structured biographical information with source citations where applicable.
+
+#### 5.1.3 Serper (Web Search) Tool
+**Purpose**: Retrieve current, real-time, or external information not in the corpus.
+
+**Default state**: **Disabled by default.**
+
+**Invocation conditions** — allowed only when:
 - Query explicitly requests current, real-time, or external information, OR
-- Query is biographical/factual and cannot be satisfied by RAG corpus.
+- Query is biographical/factual and cannot be satisfied by RAG corpus or Biography tool.
 
-### 5.3 Hard constraints
+**Hard constraints**:
 - Maximum **1–2 Serper calls per request**.
 - Serper must be invoked rarely (exception path, not normal path).
+- Results must be clearly labeled as external/unverified.
 
-### 5.4 Output handling when Serper is used
+**Output handling**:
 - Answer must include a clearly labeled **"Unverified / External Information"** section.
 - External sources must be included as Markdown links.
 - Web-derived content must **not** be blended into RAG-grounded claims.
+
+### 5.2 Tool Invocation Priority
+
+When answering queries, tools should be considered in this order:
+
+1. **RAG retrieval** (default path) — always attempted first for sermon-related queries
+2. **Sermon Lookup Tool** — for exact quote requests or context completion
+3. **Biography Tool** — for biographical questions about William Branham
+4. **Serper** — last resort for external/current information
+
+### 5.3 Tool Call Limits
+
+| Tool           | Max Calls/Request | Notes                                    |
+|----------------|-------------------|------------------------------------------|
+| Sermon Lookup  | 5                 | Can chain reads for context expansion    |
+| Biography      | 1                 | Single call returns complete bio section |
+| Serper         | 2                 | Exception path only                      |
 
 ---
 

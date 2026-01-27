@@ -21,7 +21,7 @@ from transformers import AutoModel, AutoTokenizer
 from branham_model_api.utils.device import get_device, get_dtype
 
 
-PoolingStrategy = Literal["mean", "cls", "pooler"]
+PoolingStrategy = Literal["mean", "cls", "pooler", "last_token"]
 
 
 @dataclass(frozen=True)
@@ -45,6 +45,15 @@ class EmbedderConfig:
     query_prompt_name: str | None = "query"
     doc_prompt_name: str | None = "passage"
     device_preference: str = "auto"
+    # Padding side: "right" (default for most models) or "left" (required for Qwen).
+    padding_side: Literal["left", "right"] | None = None
+    # Query instruction template for instruction-tuned models like Qwen3-Embedding.
+    # Use {query} as placeholder. Example: "Instruct: {task}\nQuery:{query}"
+    # If set, applied to queries only (documents don't need instruction).
+    query_instruction_template: str | None = None
+    # Task description for instruction-tuned models (used in query_instruction_template).
+    # Default is tailored for William Branham sermon retrieval.
+    query_task_description: str = "Given a question about William Branham's teachings or sermons, retrieve relevant sermon passages that answer the query"
 
 
 def _mean_pool(last_hidden: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
@@ -53,6 +62,27 @@ def _mean_pool(last_hidden: torch.Tensor, attention_mask: torch.Tensor) -> torch
     summed = (last_hidden * mask).sum(dim=1)  # [B, H]
     denom = mask.sum(dim=1).clamp(min=1.0)  # [B, 1]
     return summed / denom
+
+
+def _last_token_pool(last_hidden: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+    """
+    Pool embeddings from the last non-padding token (Qwen3-Embedding style).
+
+    Works correctly for both left-padded and right-padded sequences:
+    - Left-padded: last token is always at position -1
+    - Right-padded: last token is at position (seq_len - 1) for each sequence
+    """
+    # Check if left-padded: all sequences have a token at position -1
+    left_padding = (attention_mask[:, -1].sum() == attention_mask.shape[0])
+    if left_padding:
+        # For left-padded sequences, the last token is simply the last position
+        return last_hidden[:, -1]
+    else:
+        # For right-padded sequences, find the last non-padding position
+        sequence_lengths = attention_mask.sum(dim=1) - 1  # [B]
+        batch_size = last_hidden.shape[0]
+        batch_indices = torch.arange(batch_size, device=last_hidden.device)
+        return last_hidden[batch_indices, sequence_lengths]
 
 
 def _l2_normalize(x: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
@@ -74,11 +104,18 @@ class DenseEmbedder:
         self.device = get_device(cfg.device_preference)
         self.dtype = get_dtype(cfg.dtype)
 
+        # Determine padding side: explicit config > model-based inference > default "right"
+        padding_side = cfg.padding_side
+        if padding_side is None and cfg.pooling == "last_token":
+            # last_token pooling works best with left padding (Qwen style)
+            padding_side = "left"
+
         self.tokenizer = AutoTokenizer.from_pretrained(
             cfg.model_id,
             trust_remote_code=cfg.trust_remote_code,
             local_files_only=bool(cfg.local_files_only),
             cache_dir=cfg.cache_dir,
+            padding_side=padding_side if padding_side else "right",
         )
 
         # PyTorch path
@@ -240,6 +277,8 @@ class DenseEmbedder:
                         emb = outputs.pooler_output
                     elif cfg.pooling == "cls":
                         emb = outputs.last_hidden_state[:, 0, :]
+                    elif cfg.pooling == "last_token":
+                        emb = _last_token_pool(outputs.last_hidden_state, toks["attention_mask"])
                     else:
                         emb = _mean_pool(outputs.last_hidden_state, toks["attention_mask"])
 
@@ -261,9 +300,26 @@ class DenseEmbedder:
         return self._encode_texts(texts, prompt_name=self.cfg.doc_prompt_name)
 
     def embed_queries(self, texts: Sequence[str]) -> np.ndarray:
-        prefix = self.cfg.query_prefix or ""
+        """
+        Embed query texts with optional instruction template and/or prefix.
+
+        For Qwen3-Embedding style models, use query_instruction_template like:
+          "Instruct: {task}\nQuery:{query}"
+        The {task} placeholder is replaced with query_task_description.
+        The {query} placeholder is replaced with the actual query text.
+        """
+        cfg = self.cfg
+
+        # Apply instruction template if configured (e.g., Qwen3-Embedding)
+        if cfg.query_instruction_template:
+            template = cfg.query_instruction_template.replace("{task}", cfg.query_task_description)
+            texts = [template.replace("{query}", q) for q in texts]
+
+        # Apply simple prefix if configured (e.g., E5 "query: ")
+        prefix = cfg.query_prefix or ""
         if prefix:
             texts = [prefix + t for t in texts]
+
         return self._encode_texts(texts, prompt_name=self.cfg.query_prompt_name)
 
     def embed_iter(self, texts: Iterable[str], *, kind: Literal["doc", "query"]) -> np.ndarray:

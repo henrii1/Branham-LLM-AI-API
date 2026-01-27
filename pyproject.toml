@@ -67,6 +67,15 @@ postgres = [
     "asyncpg>=0.29.0",
 ]
 
+# vLLM support (for online serving - query embedding and reranking)
+# Note: vLLM requires CUDA; for Apple Silicon dev, use HuggingFace path
+# IMPORTANT: vLLM has strict version requirements. Install separately:
+#   pip install vllm>=0.8.5
+# Commented out to avoid dependency resolution issues with torch/numpy versions
+# vllm-serving = [
+#     "vllm>=0.8.5",
+# ]
+
 [dependency-groups]
 dev = [
     "black>=25.12.0",

@@ -6,6 +6,12 @@ device:
   use_bnb_quant: false
   dtype: fp16  # Options: fp16, bf16, fp32
 
+# Inference Backend (for embedding/reranking)
+# - auto: Branch-based selection (develop→HF, main+CUDA→vLLM)
+# - huggingface: Force direct HuggingFace transformers
+# - vllm: Force vLLM backend (requires CUDA)
+inference_backend: auto
+
 # API Configuration
 api:
   host: 0.0.0.0
@@ -25,8 +31,7 @@ models:
 # Retrieval Configuration
 retrieval:
   bm25:
-    top_n: 20
-    threshold: 0.5
+    top_n: 25  # Parallel retrieval, topN=25 each
     # Stage 3 / BM25 build + query parameters (datasets/docs/BM25_INDEX.md)
     k1: 1.2
     b: 0.75
@@ -35,7 +40,7 @@ retrieval:
     strip_paragraph_markers: true
     remove_stopwords: true
   dense:
-    top_n: 20
+    top_n: 25  # Parallel retrieval, topN=25 each
     # Stage 4 / Dense retrieval (datasets/docs/DENSE_RETRIEVAL.md)
     embed:
       # Qwen3-Embedding-0.6B: 32k context, 1024 dim native (supports 32-1024 MRL)
@@ -62,12 +67,37 @@ retrieval:
       nprobe: 10
   reranker:
     enabled: conditional  # Options: always, conditional, never
-    trigger_threshold: 0.15
+    # Trigger signals (any one triggers reranker)
+    # Thresholds calibrated from real query tests (2026-01-27)
+    triggers:
+      score_std_threshold: 0.015    # Very flat distribution (typical: 0.01-0.05)
+      overlap_threshold: 1          # No agreement at all (typical: 0-3)
+      top_score_threshold: 0.55     # Weak semantic match
+      quote_intent: true            # Quote-seeking queries trigger reranker
+    # Qwen3-Reranker-0.6B model settings
+    model:
+      max_length: 32768             # Full 32k context for reranking
+      dtype: fp16                   # fp16/bf16/fp32
+      batch_size: 8                 # Batch size for HuggingFace path
+      trust_remote_code: true
+      # Domain-specific instruction
+      instruction: "Given a question about William Branham's teachings or sermons, determine if the document contains relevant information to answer the query"
+    # vLLM-specific settings (for production)
+    vllm:
+      max_model_len: 32768          # Full 32k context
+      gpu_memory_utilization: 0.6   # Lower than embedder to leave headroom
+      enable_prefix_caching: true
   fusion:
-    final_top_k: 7
+    method: rrf  # Reciprocal Rank Fusion (normalizes BM25 vs dense scores)
+    rrf_k: 60    # RRF smoothing parameter (standard value)
+  collation:
+    max_sermons: 8  # Cap at 8 unique sermons (date_ids)
   expansion:
-    default_depth: 1
-    max_depth: 2
+    depth: 1  # Always ±1 (Sermon Lookup Tool handles more context)
+  refusal:
+    # Refusal based on DENSE score (semantic similarity, 0-1 range)
+    # Dense scores: 0.7+ strong, 0.55-0.7 moderate, <0.55 weak/off-topic
+    min_dense_score: 0.55  # Below this = likely off-topic query
 
 # Chunking Configuration (Section 5.1)
 chunking:

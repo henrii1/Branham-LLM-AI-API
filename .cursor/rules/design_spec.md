@@ -118,14 +118,38 @@ This API is the *only* AI endpoint called by the web app (Next.js + Supabase).
 - They may be co-located on the same hardware, but their configs remain separate to avoid tuning compromises.
 
 ### 3.4 Retrieval flow
-1. **Early BM25 guard**: Fast pre-check; if no good matches, return fixed refusal (no model call).
-2. **Parallel retrieval**: BM25 + dense retrieval run in parallel (topN each; config-driven).
-3. **Compute signals**: dense score flatness, overlap between BM25 and dense top results, confidence heuristics.
-4. **Conditional reranker**: Trigger if quote intent OR flatness OR low overlap OR low confidence.
-5. **Fusion + dedup**: Merge results, deduplicate by chunk_id.
-6. **Collate by date_id**: Group chunks by sermon; enforce fixed cap on number of sermons.
-7. **Select top-K chunks**: Typically K in [5..10], config-driven.
-8. **Expand context**: Bounded expansion ±1 default; ±2 on triggers.
+1. **Parallel retrieval**: BM25 + dense retrieval run in parallel (topN=25 each).
+2. **Compute retrieval signals**: Score flatness (std), BM25/dense overlap, top score threshold, quote intent.
+3. **Conditional reranker**: Trigger if signals indicate ambiguity (see Section 3.5).
+4. **Fusion + dedup**: Merge BM25 + dense using **Reciprocal Rank Fusion (RRF)**, deduplicate by chunk_id. RRF normalizes scores by rank position (solves BM25 vs dense scale mismatch).
+5. **Collate by date_id**: Group chunks by sermon, rank sermons by best chunk score, cap at 8 sermons.
+6. **Select top-K chunks**: From the 8 selected sermons.
+7. **Expand context**: Always ±1 chunk (Sermon Lookup Tool handles additional context needs).
+8. **Dedup after expansion**: Adjacent chunks may already be in retrieved set; remove duplicates.
+9. **Post-fusion refusal check**: If best fused score < threshold OR no valid chunks → return fixed refusal.
+
+### 3.5 Reranker trigger signals
+
+The reranker improves **sermon ranking accuracy** by re-scoring chunks before collation. Triggered when retrieval signals indicate ambiguity:
+
+| Signal | What it measures | Trigger condition |
+|--------|------------------|-------------------|
+| **Score flatness (std)** | Standard deviation of top-K dense scores | std < 0.08 → flat distribution |
+| **BM25/Dense overlap** | Intersection of top-10 from each retriever | overlap < 3 → retrievers disagree |
+| **Top score threshold** | Best dense score | score < 0.65 → weak best match |
+| **Quote intent** | Regex detection of quote-seeking queries | Detected → precision matters |
+
+**Trigger logic** (any one triggers reranker):
+```python
+trigger_rerank = (
+    score_std < 0.08 or           # Flat distribution
+    overlap_count < 3 or          # Retrievers disagree
+    top_dense_score < 0.65 or     # Weak best match
+    quote_intent_detected         # User wants exact quote
+)
+```
+
+**Note**: Thresholds require calibration with real queries. The reranker's primary value is ensuring accurate sermon ranking before truncation to 8 sermons.
 
 ---
 
@@ -251,7 +275,7 @@ When answering queries, tools should be considered in this order:
 
 ### 6.3 Refusal behavior
 Two refusal paths:
-1. **Pre-LLM refusal**: Early BM25 guard fails (fast skip).
+1. **Post-fusion refusal**: After retrieval + fusion, if best fused score < threshold OR no valid chunks → return fixed refusal (no LLM call). This saves LLM cost when evidence is genuinely missing.
 2. **Post-LLM refusal**: Model output fails evidence alignment / references / formatting checks.
 
 ---
@@ -335,16 +359,12 @@ Goal: narrative-friendly but retrieval-stable chunking.
 ### 10.2 Bounded neighborhood expansion (LOCKED)
 We reconstruct story continuity without storing separate "parent chunks".
 
-- Default expansion depth: **±1 chunk**
-- Allow **±2** chunks when more context is needed.
-- Expansion triggers should include:
-  - query patterns (regex) suggesting narrative/synthesis (e.g., "tell the story", "explain the context", "what happened when…")
-  - retrieval confidence signals (flat scores / low overlap / low confidence)
-  - reranker-triggered cases (often indicates ambiguity)
+- Expansion depth: **Always ±1 chunk** (fixed, not variable).
+- The **Sermon Lookup Tool** (Section 5.1.1) handles additional context needs on-demand during generation, allowing the model to fetch more paragraphs when required.
 
 Expansion constraints:
 - Must respect strict token budget caps.
-- Must deduplicate repeated chunks.
+- **Must deduplicate after expansion**: Adjacent chunks may already be in the retrieved set; remove duplicates before prompt building.
 - Prefer continuity within same date_id.
 
 ---
@@ -355,39 +375,46 @@ Expansion constraints:
 2. Normalize query (whitespace, punctuation).
 3. Regex checks:
    - quote intent (e.g., "exact quote", "where did he say", "which sermon")
-   - narrative intent patterns (optional)
-4. **Early BM25 guard**:
-   - Run a fast BM25 check.
-   - If BM25 returns "nothing good" (below configured threshold) → return fixed refusal (no model call).
-5. **Embed query** via vLLM (Qwen3-Embedding-0.6B).
-6. Run **BM25 + dense retrieval in parallel** (topN each; config-driven).
-7. Compute retrieval signals:
-   - dense score flatness
-   - overlap between BM25 and dense top results
-   - confidence heuristics
-8. **Conditional reranker** (Qwen3-Reranker-0.6B via vLLM):
-   - Trigger if quote intent OR flatness OR low overlap OR low confidence.
-9. Fuse + dedup:
-   - merge BM25 + dense (+ reranker if present)
+   - extract query length (word count)
+4. **Embed query** via vLLM (Qwen3-Embedding-0.6B).
+5. Run **BM25 + dense retrieval in parallel** (topN=25 each).
+6. Compute retrieval signals:
+   - score flatness (std of top-K dense scores)
+   - BM25/dense overlap (intersection of top-10 from each)
+   - top score threshold (best dense score)
+7. **Conditional reranker** (Qwen3-Reranker-0.6B via vLLM):
+   - Trigger if: flatness low OR overlap low OR top score weak OR quote intent.
+   - Reranker re-scores chunks to improve sermon ranking accuracy.
+8. Fuse + dedup:
+   - merge BM25 + dense (+ reranker scores if used)
    - deduplicate by chunk_id
-10. **Collate by date_id**:
+9. **Collate by date_id**:
     - Group chunks by sermon
-    - Select top N sermons (config-driven cap)
-11. Select final top-K chunks from selected sermons.
-12. Expand context:
-    - bounded expansion ±1 default; ±2 on triggers
-13. Build prompt with:
+    - Rank sermons by their **best chunk score**
+    - **Cap at 8 sermons**
+10. Select top-K chunks from the 8 selected sermons.
+11. **Expand context** (always ±1 chunk):
+    - Fetch adjacent chunks for each retrieved chunk
+    - Stay within same sermon (date_id)
+12. **Dedup after expansion**:
+    - Adjacent chunks may already be in retrieved set
+    - Remove duplicates before prompt building
+13. **Post-fusion refusal check**:
+    - If best fused score < threshold OR no valid chunks → return fixed refusal (no LLM call)
+14. Build prompt with:
     - system prompt rules
-    - retrieved context
+    - retrieved context (deduplicated, expanded)
     - user language
+    - tool definitions (Sermon Lookup, Biography, Serper)
     - formatting requirements (inline refs + refs block)
-14. **Generate response** via LiteLLM → external API (multilingual model).
-15. Post-check enforcement:
+15. **Generate response** via LiteLLM → external API (multilingual model).
+    - Model may invoke tools (e.g., Sermon Lookup for more context)
+16. Post-check enforcement:
     - references present
     - references valid (date_id exists; chunk_ids exist; paragraph range present)
     - output format compliance
     - evidence alignment (if required checks fail → refusal)
-16. Return answer + references payload.
+17. Return answer + references payload.
 
 ---
 
@@ -455,7 +482,38 @@ Expansion constraints:
 - `DEVICE_PREFERENCE=mps|cuda|cpu|auto`
 - `DTYPE=fp16|bf16|fp32`
 
-### 14.3 Multi-GPU (future)
+### 14.3 Branch-based inference backend selection
+
+The embedding and reranking backend is selected based on **git branch** and **device availability**:
+
+| Git Branch | CUDA Available | Backend |
+|------------|----------------|---------|
+| `develop`  | Any            | Direct HuggingFace (transformers) |
+| `main`     | Yes            | vLLM (production-optimized) |
+| `main`     | No             | Direct HuggingFace (fallback) |
+
+**Rationale**:
+- **develop**: Simpler setup, no vLLM server overhead, faster iteration
+- **main + CUDA**: vLLM provides better throughput/latency for production workloads
+- **main + no CUDA**: Graceful fallback to HF (e.g., CI environments)
+
+**Implementation**:
+- `utils/git_branch.py`: Detects current git branch
+- Embedder/reranker clients check branch + device to select backend
+- vLLM models are prefetched on container startup (production only)
+
+```python
+# Example usage
+from branham_model_api.utils.git_branch import get_git_branch
+from branham_model_api.utils.device import get_device
+
+branch = get_git_branch()
+device = get_device()
+
+use_vllm = (branch == "main" and device.type == "cuda")
+```
+
+### 14.4 Multi-GPU (future)
 - Training must support multi-GPU via `accelerate` (future versions).
 - Keep inference modular so multi-GPU inference can be added later (do not hardcode single-device assumptions).
 
@@ -601,36 +659,40 @@ model-api/
 +----------------------------------------------------------------------+
 |                         Pipeline (Request)                           |
 |----------------------------------------------------------------------|
-|  1) Normalize query + regex intent flags                             |
+|  1) Normalize query + regex intent flags (quote intent, query length)|
 |                                                                      |
-|  2) Early BM25 guard                                                 |
-|     - if "not good": return fixed refusal (NO generator call)        |
+|  2) Embed query (vLLM: Qwen3-Embedding-0.6B)                         |
 |                                                                      |
-|  3) Embed query (vLLM: Qwen3-Embedding-0.6B)                         |
-|                                                                      |
-|  4) Parallel retrieval                                               |
+|  3) Parallel retrieval (~200ms)                                      |
 |     +------------------+      +------------------+                   |
 |     |      BM25        |      | Dense (FAISS)   |                   |
-|     | (topN chunks)    |      | (topN chunks)   |                   |
+|     |   (topN=25)      |      |   (topN=25)     |                   |
 |     +---------+--------+      +---------+--------+                   |
 |               \__________________________/                           |
 |                          |                                           |
-|  5) Signals: flatness / overlap / confidence                         |
+|  4) Compute signals: flatness (std) / overlap / top score            |
 |                                                                      |
-|  6) Conditional reranker (vLLM: Qwen3-Reranker-0.6B)                 |
-|     - only if triggered by signals                                   |
+|  5) Conditional reranker (vLLM: Qwen3-Reranker-0.6B)                 |
+|     - Trigger if: std < 0.08 OR overlap < 3 OR top < 0.65 OR quote   |
+|     - Re-scores chunks to improve sermon ranking                     |
 |                                                                      |
-|  7) Fusion + dedup (chunk_id)                                        |
+|  6) Fusion + dedup (by chunk_id)                                     |
 |                                                                      |
-|  8) Collate by date_id (group by sermon, cap sermon count)           |
+|  7) Collate by date_id                                               |
+|     - Rank sermons by best chunk score                               |
+|     - Cap at 8 sermons                                               |
 |                                                                      |
-|  9) Select top-K chunks from selected sermons                        |
+|  8) Expand context (always ±1 chunk)                                 |
 |                                                                      |
-| 10) Bounded neighborhood expansion (±1 or ±2)                        |
+|  9) Dedup after expansion (remove duplicates)                        |
 |                                                                      |
-| 11) Prompt build (system rules + context + user language)            |
+| 10) Post-fusion refusal check                                        |
+|     - If best score < threshold OR no chunks → REFUSAL (no LLM)      |
+|                                                                      |
+| 11) Prompt build (system rules + context + tools + user language)    |
 |                                                                      |
 | 12) Generate response (LiteLLM → External API)                       |
+|     - Tools available: Sermon Lookup, Biography, Serper (gated)      |
 |                                                                      |
 | 13) Post-check enforcement                                           |
 |     - references present + valid (date_id + paragraph range)         |

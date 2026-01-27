@@ -107,25 +107,172 @@ Succinct log of development progress.
 
 ---
 
+## 2026-01-27
+
+### Pipeline Design Refinements
+
+Based on benchmark results (BM25: ~200ms, FAISS: ~4ms + 180ms embedding), revised the retrieval pipeline:
+
+**Removed Early BM25 Guard**:
+- BM25 is not fast enough (~200ms) for an "early guard" pattern
+- Refusal decision now happens **post-fusion** based on combined retrieval quality
+- Saves LLM cost when evidence is genuinely missing, but doesn't add latency to every request
+
+**Updated Retrieval Parameters**:
+- `topN = 25` for both BM25 and dense (was 20)
+- Parallel retrieval: ~200ms total (max of both)
+
+**Refined Reranker Trigger Signals**:
+- Score flatness (std < 0.08) → flat distribution = ambiguous
+- BM25/Dense overlap (< 3 in top-10) → retrievers disagree
+- Top score threshold (< 0.65) → weak best match
+- Quote intent detection → precision matters
+- Removed: score gap between #1 and #2 (not useful since we add both anyway)
+
+**Reranker's Primary Value**:
+- Improves **sermon ranking accuracy** by re-scoring chunks
+- Sermons ranked by best chunk score → truncate to 8 sermons
+- Without reranking on ambiguous queries, might keep wrong sermons
+
+**Collation & Expansion**:
+- Cap at **8 unique sermons** (date_ids)
+- Expansion: **always ±1** (fixed, not variable)
+- Sermon Lookup Tool handles additional context needs during generation
+
+**Dedup Flow**:
+1. Merge BM25 + Dense → dedup by chunk_id
+2. (Optional) Rerank
+3. Collate by date_id, rank sermons by best chunk score
+4. Keep top 8 sermons
+5. Expand ±1 adjacent chunks
+6. **Dedup again** (adjacent chunks may already be retrieved)
+
+**Branch-based Inference Backend**:
+- `develop` branch → Direct HuggingFace (simpler, no vLLM overhead)
+- `main` branch + CUDA → vLLM (production-optimized)
+- `main` branch + no CUDA → HuggingFace (fallback)
+- Created `utils/git_branch.py` with detection utilities
+- Added `inference_backend` config option for overrides
+
+**Updated Files**:
+- `.cursor/rules/design_spec.md` - Sections 3.4, 3.5, 6.3, 10.2, 11, 14.3, 18
+- `config/default.yaml` - retrieval parameters, inference_backend
+- `src/branham_model_api/utils/git_branch.py` - NEW
+- `src/branham_model_api/utils/__init__.py` - exports
+- `WORKING_PROGRESS.md` - this entry
+
+---
+
+---
+
+## 2026-01-27 (continued)
+
+### RAG Pipeline Implementation
+
+Built the complete retrieval pipeline from user query to context-ready sermons:
+
+**Files Created:**
+
+1. `retrieval/store/chunk_store.py`
+   - SQLite-backed chunk lookup
+   - `get_chunk()`, `get_chunks()`, `get_chunks_by_sermon()`
+   - `get_adjacent_chunks()` for expansion
+   - `get_sermon()` metadata lookup
+
+2. `core/pipeline/signals.py`
+   - Retrieval signal computation
+   - `detect_quote_intent()` - regex patterns for quote-seeking queries
+   - `compute_dense_score_std()` - score flatness
+   - `compute_overlap()` - BM25/dense agreement
+   - `RetrievalSignals.should_rerank()` - trigger decision
+
+3. `core/pipeline/fusion.py`
+   - `merge_bm25_dense()` - merge + dedup by chunk_id
+   - `apply_rerank_scores()` - apply reranker scores
+   - `collate_by_sermon()` - group by date_id, rank sermons, cap at 8
+   - `FusedHit`, `SermonGroup` dataclasses
+
+4. `core/pipeline/expansion.py`
+   - `expand_chunks()` - fetch ±1 adjacent chunks
+   - `expand_and_group()` - expand + group by sermon
+   - `format_sermon_context()` - format for prompt
+   - `ExpandedChunk`, `ExpandedSermon` dataclasses
+
+5. `core/pipeline/rag_pipeline.py`
+   - `RAGPipeline` - main orchestrator
+   - `RetrievalConfig` - all configurable thresholds
+   - `RetrievalResult` - complete pipeline output
+   - `EmbedderProtocol`, `RerankerProtocol` - backend-agnostic interfaces
+   - `create_rag_pipeline()` - factory with all components loaded
+
+**Pipeline Flow:**
+```
+Query → Normalize → [BM25 | Dense] parallel → Signals →
+[Reranker if triggered] → Fusion/Dedup → Collate (8 sermons) →
+Expand ±1 → Dedup → RetrievalResult
+```
+
+**Key Design Decisions:**
+- No truncation until sermon collation (keep all chunks from top 8 sermons)
+- Reranker improves sermon ranking accuracy
+- Expansion always ±1 (Sermon Lookup Tool handles more)
+- Refusal based on dense score (semantic similarity)
+
+### Pipeline Testing & Calibration
+
+Tested with 20 queries covering general, quote-seeking, and out-of-domain queries.
+
+**Issues Found & Fixed:**
+1. **Score scale mismatch**: BM25 (3-17) vs Dense (0.4-0.8)
+   - Fix: Implemented Reciprocal Rank Fusion (RRF) instead of max()
+   - RRF normalizes by rank position: score = Σ(1/(k+rank))
+
+2. **Refusal not working**: Off-topic queries passed because BM25 always finds keyword matches
+   - Fix: Refusal based on `dense_top_score` (semantic similarity)
+   - Threshold: 0.55 (below = off-topic)
+
+3. **Reranker triggers too strict**: Original thresholds triggered on every query
+   - Old: std<0.08, overlap<3, top<0.65
+   - New: std<0.015, overlap<1, top<0.55
+
+**Test Results (20 queries):**
+- Refused: 2 (pasta, quantum physics - correctly off-topic)
+- Quote intent detected: 8 (correctly identified)
+- Reranker would trigger: ~15 (quote intent + low overlap + flat scores)
+
+**Calibrated Thresholds:**
+```yaml
+score_std_threshold: 0.015  # Very flat distribution
+overlap_threshold: 1        # No BM25/dense agreement
+top_score_threshold: 0.55   # Weak semantic match
+min_dense_score: 0.55       # Off-topic refusal
+```
+
+---
+
 ## Status Summary
 
 **Completed**: 
 - Environment setup, project scaffolding, API skeleton, configuration, documentation
 - PDF download, paragraph extraction to SQLite
 - BM25 index build (Stage 3) ✓
-- Initial FAISS index build (Stage 4 with jina-v3) — **NEEDS REBUILD**
+- FAISS index build (Stage 4) ✓
+- Pipeline design finalized (post-benchmark refinements)
 
 **In Progress**:
-- V1 architecture revision (design docs updated)
-- Stage 4 rebuild with Qwen3-Embedding-0.6B
+- Building the API flow (RAG pipeline implementation)
 
-**Next Steps**:
-1. Rebuild Stage 4 (FAISS index) with `Qwen/Qwen3-Embedding-0.6B`
-2. Implement vLLM serving for embedding model (online query embedding)
-3. Implement vLLM serving for reranker (conditional)
-4. Implement LiteLLM integration for generation
-5. Implement sermon-level (date_id) collation in retrieval pipeline
-6. Implement Serper tool integration (optional, gated)
+**Next Steps** (API Flow Implementation):
+1. `retrieval/store/chunk_store.py` — SQLite chunk store (lookup by chunk_id, date_id)
+2. `core/pipeline/signals.py` — Compute retrieval signals (flatness, overlap, top score)
+3. `core/pipeline/fusion.py` — Merge BM25 + dense, dedup by chunk_id
+4. `core/pipeline/rerank.py` — Conditional reranker invocation
+5. `core/pipeline/expansion.py` — ±1 expansion + dedup
+6. `core/pipeline/postcheck.py` — Reference validation, format compliance
+7. `core/pipeline/rag_pipeline.py` — Main orchestrator
+8. `generation/litellm_client.py` — LiteLLM wrapper
+9. `generation/api_keys.py` — API key rotation
+10. Wire up `/chat` endpoint with full pipeline
 
 **Future (NOT V1)**:
 - Self-hosted generation model via vLLM

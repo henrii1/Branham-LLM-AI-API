@@ -42,41 +42,37 @@ See `.cursor/rules/design_spec.md` for complete architecture details.
 - ✅ **Stage 2**: Deterministic chunks built in SQLite
 - ✅ **Stage 3**: BM25 index built (`data/indices/bm25.index`)
 
-### Stage 4 (Partial - Needs Rebuild)
+### Stage 4 (Complete)
 - ✅ Dense embedding + FAISS infrastructure implemented
-- 🔄 **REBUILD REQUIRED**: Change embedding model from jina-v3 to Qwen3-Embedding-0.6B
+- ✅ FAISS index built with Qwen3-Embedding-0.6B
 
 ---
 
 ## 🚧 In Progress
 
-### Stage 4 Rebuild
-- [ ] Update embedder for `Qwen/Qwen3-Embedding-0.6B`
-- [ ] Rebuild FAISS index with new embeddings
-- [ ] Validate with benchmark script
+### RAG Pipeline Implementation
+Building the API flow from user query to response.
 
 ---
 
 ## 📋 Next Steps (V1)
 
-### Phase 1: Complete Retrieval Infrastructure
-1. Rebuild Stage 4 (FAISS index) with Qwen3-Embedding
-2. Implement vLLM serving for embedding model (online query embedding)
-3. Implement vLLM serving for reranker (conditional)
-4. Implement chunk store utilities
+### Phase 1: RAG Pipeline Core
+1. `retrieval/store/chunk_store.py` — SQLite chunk lookup (by chunk_id, date_id)
+2. `core/pipeline/signals.py` — Retrieval signals (flatness, overlap, top score)
+3. `core/pipeline/fusion.py` — Merge BM25 + dense, dedup by chunk_id
+4. `core/pipeline/rerank.py` — Conditional reranker (signal-triggered)
+5. `core/pipeline/expansion.py` — ±1 expansion + post-expansion dedup
 
-### Phase 2: RAG Pipeline
-1. Implement fusion logic (BM25 + dense)
-2. Implement retrieval signals (flatness, overlap, confidence)
-3. Implement date_id collation (sermon-level grouping)
-4. Implement context expansion (±1/±2 chunks)
-5. Implement post-check enforcement
+### Phase 2: Pipeline Orchestration
+1. `core/pipeline/rag_pipeline.py` — Main orchestrator (ties all steps)
+2. `core/pipeline/postcheck.py` — Reference validation, format compliance
+3. `core/prompts/templates.py` — Prompt building with context
 
 ### Phase 3: Generation Integration
-1. Implement LiteLLM client
-2. Implement API key rotation for rate limiting
-3. Implement prompt building
-4. Implement Serper tool (optional, gated)
+1. `generation/litellm_client.py` — LiteLLM wrapper for external APIs
+2. `generation/api_keys.py` — API key rotation for rate limiting
+3. Tool implementations (Sermon Lookup, Biography, Serper)
 
 ### Phase 4: API Integration
 1. Wire up `/chat` endpoint with full pipeline
@@ -101,11 +97,11 @@ See `.cursor/rules/design_spec.md` for complete architecture details.
 ✅ Configuration: 100%
 ✅ API skeleton: 100%
 ✅ Documentation: 100%
-✅ Data ingestion (Stages 1-3): 100%
-🔄 Dense retrieval (Stage 4): 80% (needs rebuild with Qwen model)
-⏳ vLLM serving setup: 0%
-⏳ RAG Pipeline: 10%
-⏳ LiteLLM integration: 0%
+✅ Data ingestion (Stages 1-4): 100%
+✅ Index building (BM25 + FAISS): 100%
+✅ Pipeline design: 100%
+⏳ RAG Pipeline implementation: 15%
+⏳ Generation integration: 0%
 ⏳ End-to-end testing: 0%
 ```
 

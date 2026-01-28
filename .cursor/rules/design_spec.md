@@ -121,35 +121,52 @@ This API is the *only* AI endpoint called by the web app (Next.js + Supabase).
 1. **Parallel retrieval**: BM25 + dense retrieval run in parallel (topN=25 each).
 2. **Compute retrieval signals**: Score flatness (std), BM25/dense overlap, top score threshold, quote intent.
 3. **Conditional reranker**: Trigger if signals indicate ambiguity (see Section 3.5).
-4. **Fusion + dedup**: Merge BM25 + dense using **Reciprocal Rank Fusion (RRF)**, deduplicate by chunk_id. RRF normalizes scores by rank position (solves BM25 vs dense scale mismatch).
-5. **Collate by date_id**: Group chunks by sermon, rank sermons by best chunk score, cap at 8 sermons.
-6. **Select top-K chunks**: From the 8 selected sermons.
-7. **Expand context**: Always ±1 chunk (Sermon Lookup Tool handles additional context needs).
+4. **Fusion + dedup**: Merge BM25 + dense using **Reciprocal Rank Fusion (RRF)**, deduplicate by chunk_id.
+5. **Collate by date_id**: Group chunks by sermon, rank by **composite score** (chunk_count + best_score), cap at 8.
+6. **Exact match fallback**: If query contains date_id or matches sermon title, add as 9th sermon if not in top 8.
+7. **Expand context**: Configurable ±N chunks (0 = disabled, 1 = ±1). Sermon Lookup Tool handles more.
 8. **Dedup after expansion**: Adjacent chunks may already be in retrieved set; remove duplicates.
-9. **Post-fusion refusal check**: If best fused score < threshold OR no valid chunks → return fixed refusal.
+9. **Post-fusion refusal check**: If dense_top_score < threshold → return fixed refusal (semantic relevance).
 
-### 3.5 Reranker trigger signals
+**Composite sermon scoring** (step 5):
+```
+composite = 0.5 * (chunk_count / max_chunk_count) + 0.5 * (best_score / max_best_score)
+```
+This ranks sermons with broader topical coverage higher, not just single high-scoring chunks.
 
-The reranker improves **sermon ranking accuracy** by re-scoring chunks before collation. Triggered when retrieval signals indicate ambiguity:
+**Indexing**: Both BM25 and FAISS index `text_with_metadata` which includes sermon title, date_id, and paragraph markers for better metadata queries.
 
-| Signal | What it measures | Trigger condition |
-|--------|------------------|-------------------|
-| **Score flatness (std)** | Standard deviation of top-K dense scores | std < 0.08 → flat distribution |
-| **BM25/Dense overlap** | Intersection of top-10 from each retriever | overlap < 3 → retrievers disagree |
-| **Top score threshold** | Best dense score | score < 0.65 → weak best match |
-| **Quote intent** | Regex detection of quote-seeking queries | Detected → precision matters |
+### 3.5 Reranker configuration
 
-**Trigger logic** (any one triggers reranker):
-```python
-trigger_rerank = (
-    score_std < 0.08 or           # Flat distribution
-    overlap_count < 3 or          # Retrievers disagree
-    top_dense_score < 0.65 or     # Weak best match
-    quote_intent_detected         # User wants exact quote
-)
+**Config** (`config/default.yaml`):
+```yaml
+reranker:
+  enabled: never  # Options: always, conditional, never
 ```
 
-**Note**: Thresholds require calibration with real queries. The reranker's primary value is ensuring accurate sermon ranking before truncation to 8 sermons.
+| Mode | Behavior | Latency | Default |
+|------|----------|---------|---------|
+| `never` | Skip reranking entirely | ~50-100ms/query | **Yes** |
+| `conditional` | Trigger based on signals | ~10-12s/query when triggered | No |
+| `always` | Always rerank | ~10-12s/query | No |
+
+**Rationale**: Testing showed the reranker adds significant latency (~100x slower) with marginal quality improvement when metadata-embedded indices are used. The fusion + composite scoring already produces accurate sermon rankings.
+
+**Trigger signals** (only used when `enabled: conditional`):
+
+| Signal | Trigger condition |
+|--------|-------------------|
+| Score flatness (std) | std < 0.015 |
+| BM25/Dense overlap | overlap < 1 |
+| Top score threshold | score < 0.55 |
+| Quote intent | Detected |
+
+**Refusal threshold**: `dense_top_score < 0.55` → off-topic query, return fixed refusal.
+
+**Model prefetch**: Use `--skip-reranker` flag when reranker is disabled:
+```bash
+uv run python scripts/prefetch_hf_model.py --all --skip-reranker --target-dir ./.hf-cache
+```
 
 ---
 
@@ -291,6 +308,33 @@ System prompt must guide the model to:
   - plus a consolidated references list at end
 
 **Important**: Server-side post-check must enforce the contract; do not rely on prompt alone.
+
+---
+
+## 7.5) Configuration System
+
+All settings are centralized in `config/default.yaml` and loaded via `src/branham_model_api/config.py`.
+
+**Loading config in code**:
+```python
+from branham_model_api.config import get_config
+cfg = get_config()
+print(cfg.retrieval.reranker.enabled)  # "never"
+```
+
+**Loading RetrievalConfig**:
+```python
+from branham_model_api.core.pipeline import RetrievalConfig
+config = RetrievalConfig.from_yaml()  # Loads from config/default.yaml
+```
+
+**Key config sections** (`config/default.yaml`):
+- `retrieval.bm25` — BM25 parameters (top_n, k1, b)
+- `retrieval.dense` — Dense embedding parameters
+- `retrieval.reranker` — Reranker mode (never/conditional/always)
+- `retrieval.collation` — max_sermons
+- `retrieval.refusal` — min_dense_score threshold
+- `indices` — Index file paths
 
 ---
 

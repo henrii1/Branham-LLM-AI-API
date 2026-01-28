@@ -66,7 +66,7 @@ retrieval:
       pq_m: 16
       nprobe: 10
   reranker:
-    enabled: conditional  # Options: always, conditional, never
+    enabled: never  # Options: always, conditional, never (default: never - reranker adds latency without significant benefit)
     # Trigger signals (any one triggers reranker)
     # Thresholds calibrated from real query tests (2026-01-27)
     triggers:
@@ -93,7 +93,7 @@ retrieval:
   collation:
     max_sermons: 8  # Cap at 8 unique sermons (date_ids)
   expansion:
-    depth: 1  # Always ±1 (Sermon Lookup Tool handles more context)
+    depth: 0  # 0=disabled, 1=±1 adjacent chunks. Sermon Lookup Tool handles more context.
   refusal:
     # Refusal based on DENSE score (semantic similarity, 0-1 range)
     # Dense scores: 0.7+ strong, 0.55-0.7 moderate, <0.55 weak/off-topic

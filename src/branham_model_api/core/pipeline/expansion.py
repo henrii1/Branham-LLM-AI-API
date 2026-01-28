@@ -107,6 +107,8 @@ def expand_chunks(
 def group_expanded_by_sermon(
     expanded_chunks: Sequence[ExpandedChunk],
     chunk_store: ChunkStore,
+    *,
+    sermon_order: Sequence[str] | None = None,
 ) -> list[ExpandedSermon]:
     """
     Group expanded chunks by sermon and fetch sermon metadata.
@@ -114,9 +116,12 @@ def group_expanded_by_sermon(
     Args:
         expanded_chunks: Expanded and deduplicated chunks
         chunk_store: Database for looking up sermon metadata
+        sermon_order: Optional list of date_ids specifying the desired order.
+                      If provided, sermons are returned in this order (preserving collation ranking).
+                      If not provided, sorts by best_score descending.
 
     Returns:
-        List of ExpandedSermon (with metadata), sorted by best_score descending
+        List of ExpandedSermon (with metadata), in specified order or by best_score
     """
     # Group by date_id
     sermons: dict[str, list[ExpandedChunk]] = {}
@@ -154,8 +159,14 @@ def group_expanded_by_sermon(
             chunks=chunks,
         ))
 
-    # Sort sermons by best score
-    result.sort(key=lambda s: s.best_score, reverse=True)
+    # Sort sermons: preserve provided order if given, else by best_score
+    if sermon_order is not None:
+        # Create index map for ordering
+        order_map = {date_id: i for i, date_id in enumerate(sermon_order)}
+        # Sermons not in order_map go to the end, sorted by best_score
+        result.sort(key=lambda s: (order_map.get(s.date_id, len(sermon_order)), -s.best_score))
+    else:
+        result.sort(key=lambda s: s.best_score, reverse=True)
     return result
 
 
@@ -164,6 +175,7 @@ def expand_and_group(
     chunk_store: ChunkStore,
     *,
     delta: int = 1,
+    sermon_order: Sequence[str] | None = None,
 ) -> list[ExpandedSermon]:
     """
     Convenience function: expand chunks and group by sermon.
@@ -172,13 +184,15 @@ def expand_and_group(
         fused_hits: Retrieved chunks with scores
         chunk_store: Database for looking up chunks
         delta: Number of adjacent chunks to include (default ±1)
+        sermon_order: Optional list of date_ids specifying the desired order.
+                      If provided, preserves the ranking from collation.
 
     Returns:
         List of ExpandedSermon with metadata and expanded context,
-        sorted by best_score descending
+        in specified order or by best_score descending
     """
     expanded = expand_chunks(fused_hits, chunk_store, delta=delta)
-    return group_expanded_by_sermon(expanded, chunk_store)
+    return group_expanded_by_sermon(expanded, chunk_store, sermon_order=sermon_order)
 
 
 def format_sermon_context(sermon: ExpandedSermon) -> str:

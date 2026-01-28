@@ -152,7 +152,21 @@ class Bm25Index:
         return obj
 
 
-def iter_chunks_from_sqlite(db_path: Path, *, limit: Optional[int] = None) -> Iterator[tuple[str, str]]:
+def iter_chunks_from_sqlite(
+    db_path: Path,
+    *,
+    limit: Optional[int] = None,
+    use_metadata: bool = True,
+) -> Iterator[tuple[str, str]]:
+    """
+    Iterate over chunks from SQLite database.
+    
+    Args:
+        db_path: Path to chunks.sqlite
+        limit: Optional limit on number of chunks
+        use_metadata: If True, use text_with_metadata column (includes sermon title, date_id, paragraph markers).
+                      If False, use raw text column.
+    """
     conn = sqlite3.connect(db_path, timeout=60.0)
     try:
         conn.execute("PRAGMA busy_timeout = 60000;")
@@ -160,8 +174,10 @@ def iter_chunks_from_sqlite(db_path: Path, *, limit: Optional[int] = None) -> It
         conn.execute("PRAGMA synchronous = NORMAL;")
         cur = conn.cursor()
 
-        sql = """
-        SELECT chunk_id, text
+        # Use text_with_metadata for better retrieval (includes sermon title, date_id, ¶markers)
+        text_col = "text_with_metadata" if use_metadata else "text"
+        sql = f"""
+        SELECT chunk_id, {text_col}
         FROM chunks
         ORDER BY date_id ASC, chunk_index ASC, chunk_id ASC
         """
@@ -184,9 +200,19 @@ def build_bm25_index_from_sqlite(
     b: float = 0.75,
     preprocess_cfg: Optional[Bm25PreprocessConfig] = None,
     limit: Optional[int] = None,
+    use_metadata: bool = True,
 ) -> tuple[Bm25Index, dict[str, Any]]:
     """
     Build a BM25 index from `chunks.sqlite` (Stage 3).
+
+    Args:
+        db_path: Path to chunks.sqlite
+        k1: BM25 k1 parameter
+        b: BM25 b parameter
+        preprocess_cfg: Preprocessing configuration
+        limit: Optional limit on number of chunks
+        use_metadata: If True, index text_with_metadata (includes sermon title, date_id, ¶markers).
+                      Default True for better retrieval on metadata queries.
 
     Returns:
       (index, meta_dict) where meta_dict is intended for `bm25_meta.json`.
@@ -199,12 +225,12 @@ def build_bm25_index_from_sqlite(
     doc_id_to_chunk_id: list[str] = []
 
     corpus_hasher = hashlib.sha256()
-    corpus_hash_input = "chunk_id + NUL + raw_text"
+    corpus_hash_input = "chunk_id + NUL + text_with_metadata" if use_metadata else "chunk_id + NUL + raw_text"
 
     total_dl = 0
     doc_id = 0
 
-    for chunk_id, text in iter_chunks_from_sqlite(db_path, limit=limit):
+    for chunk_id, text in iter_chunks_from_sqlite(db_path, limit=limit, use_metadata=use_metadata):
         # Corpus hash is over the raw text to detect any corpus drift.
         corpus_hasher.update(chunk_id.encode("utf-8"))
         corpus_hasher.update(b"\x00")

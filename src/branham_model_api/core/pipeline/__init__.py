@@ -47,6 +47,7 @@ from .fusion import (
     SermonGroup,
     apply_rerank_scores,
     collate_by_sermon,
+    find_exact_match_sermons,
     get_all_chunks_from_sermons,
     merge_bm25_dense,
 )
@@ -91,6 +92,7 @@ __all__ = [
     "merge_bm25_dense",
     "apply_rerank_scores",
     "collate_by_sermon",
+    "find_exact_match_sermons",
     "get_all_chunks_from_sermons",
     # Expansion
     "ExpandedChunk",

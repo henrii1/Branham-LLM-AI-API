@@ -4,13 +4,14 @@
 
 The project is being built as a **RAG-first system** with the following V1 architecture:
 
-| Component   | Model                        | Serving       |
-|-------------|------------------------------|---------------|
-| Embedding   | `Qwen/Qwen3-Embedding-0.6B`  | vLLM          |
-| Reranker    | `Qwen/Qwen3-Reranker-0.6B`   | vLLM          |
-| Generation  | External API (configurable)  | LiteLLM       |
+| Component   | Model                        | Serving       | Required |
+|-------------|------------------------------|---------------|----------|
+| Embedding   | `Qwen/Qwen3-Embedding-0.6B`  | vLLM          | Yes |
+| Reranker    | `Qwen/Qwen3-Reranker-0.6B`   | vLLM          | No (disabled by default) |
+| Generation  | External API (configurable)  | LiteLLM       | Yes |
 
 See `.cursor/rules/design_spec.md` for complete architecture details.
+See `config/default.yaml` for all configuration options.
 
 ---
 
@@ -48,36 +49,43 @@ See `.cursor/rules/design_spec.md` for complete architecture details.
 
 ---
 
+## ✅ Recently Completed
+
+### RAG Pipeline Core (2026-01-27/28)
+- ✅ `retrieval/store/chunk_store.py` — SQLite chunk lookup
+- ✅ `core/pipeline/signals.py` — Retrieval signals (flatness, overlap, quote intent)
+- ✅ `core/pipeline/fusion.py` — RRF fusion, composite scoring, exact match fallback
+- ✅ `core/pipeline/expansion.py` — ±1 expansion with sermon order preservation
+- ✅ `core/pipeline/rag_pipeline.py` — Main orchestrator
+- ✅ `config.py` — Config loader (reads from `config/default.yaml`)
+- ✅ Reranker integration (configurable: never/conditional/always, default: never)
+- ✅ Test harness with 20 queries (`scripts/test_rag_pipeline.py`)
+
+---
+
 ## 🚧 In Progress
 
-### RAG Pipeline Implementation
-Building the API flow from user query to response.
+### LiteLLM Generation Integration
+Building the generation layer with external API support.
 
 ---
 
 ## 📋 Next Steps (V1)
 
-### Phase 1: RAG Pipeline Core
-1. `retrieval/store/chunk_store.py` — SQLite chunk lookup (by chunk_id, date_id)
-2. `core/pipeline/signals.py` — Retrieval signals (flatness, overlap, top score)
-3. `core/pipeline/fusion.py` — Merge BM25 + dense, dedup by chunk_id
-4. `core/pipeline/rerank.py` — Conditional reranker (signal-triggered)
-5. `core/pipeline/expansion.py` — ±1 expansion + post-expansion dedup
-
-### Phase 2: Pipeline Orchestration
-1. `core/pipeline/rag_pipeline.py` — Main orchestrator (ties all steps)
-2. `core/pipeline/postcheck.py` — Reference validation, format compliance
-3. `core/prompts/templates.py` — Prompt building with context
-
-### Phase 3: Generation Integration
+### Phase 1: Generation Integration
 1. `generation/litellm_client.py` — LiteLLM wrapper for external APIs
 2. `generation/api_keys.py` — API key rotation for rate limiting
-3. Tool implementations (Sermon Lookup, Biography, Serper)
+3. `core/prompts/templates.py` — Prompt building with context
 
-### Phase 4: API Integration
+### Phase 2: API Integration
 1. Wire up `/chat` endpoint with full pipeline
 2. Implement streaming (SSE)
-3. Implement health checks for all services
+3. `core/pipeline/postcheck.py` — Reference validation (optional)
+
+### Phase 3: Tools (Optional)
+1. Sermon Lookup Tool
+2. Biography Tool
+3. Serper Tool
 
 ---
 
@@ -98,9 +106,10 @@ Building the API flow from user query to response.
 ✅ API skeleton: 100%
 ✅ Documentation: 100%
 ✅ Data ingestion (Stages 1-4): 100%
-✅ Index building (BM25 + FAISS): 100%
+✅ Index building (BM25 + FAISS with metadata): 100%
 ✅ Pipeline design: 100%
-⏳ RAG Pipeline implementation: 15%
+✅ RAG Pipeline implementation: 100%
+✅ Config loader: 100%
 ⏳ Generation integration: 0%
 ⏳ End-to-end testing: 0%
 ```
@@ -110,12 +119,13 @@ Building the API flow from user query to response.
 ## 📚 Key Files to Reference
 
 - `.cursor/rules/design_spec.md` - Complete V1 implementation guide
+- `config/default.yaml` - All configuration options
+- `src/branham_model_api/config.py` - Config loader
+- `src/branham_model_api/core/pipeline/` - RAG pipeline components
+- `scripts/test_rag_pipeline.py` - Pipeline test harness
 - `datasets/docs/DATA_FORMAT.md` - Data specifications
-- `datasets/docs/DENSE_RETRIEVAL.md` - Dense retrieval (Qwen3-Embedding)
-- `datasets/docs/BM25_INDEX.md` - BM25 specifications
 - `WORKING_PROGRESS.md` - Detailed progress log
-- `config/default.yaml` - Configuration reference
 
 ---
 
-**Foundation is solid. Stage 4 rebuild in progress. 🚀**
+**RAG pipeline complete. LiteLLM integration next. 🚀**

@@ -250,29 +250,118 @@ min_dense_score: 0.55       # Off-topic refusal
 
 ---
 
+## 2026-01-28
+
+### Metadata Indexing & Retrieval Improvements
+
+**Problem**: Queries by date_id (e.g., "65-0711") or sermon title didn't rank those sermons first because metadata wasn't indexed.
+
+**Solution**: Patched chunks table and updated index builders.
+
+**Changes to chunks.sqlite:**
+- Added `sermon_title` column (populated from sermons table)
+- Added `text_with_metadata` column with format:
+  ```
+  [Sermon: FAITH IS THE SUBSTANCE | ID: 47-0412 | ¶1-5]
+  {actual text}
+  ```
+- Both BM25 and FAISS now index `text_with_metadata` by default
+- Script: `scripts/patch_chunks_with_metadata.py`
+
+**Composite Sermon Scoring:**
+- Sermons ranked by `composite = 0.5 * norm_chunk_count + 0.5 * norm_best_score`
+- Normalization: each value divided by max across all sermons
+- Sermons with more retrieved chunks rank higher (breadth of relevance)
+
+**Exact Match Fallback:**
+- If query contains date_id pattern (e.g., "65-0711"), add that sermon as 9th slot
+- If query matches sermon title via ILIKE, add that sermon as 9th slot
+- Deduped if already in top 8
+
+**Expansion Bug Fix:**
+- Fixed: `group_expanded_by_sermon()` was re-sorting by best_score only
+- Now preserves composite ranking via `sermon_order` parameter
+
+**Expansion Config:**
+- `expansion_delta` now configurable (0 = disabled, 1 = ±1 chunks)
+- Set to 0 for smaller context; Sermon Lookup Tool handles additional context
+
+**Files Modified:**
+- `datasets/docs/DATA_FORMAT.md` - chunks schema
+- `src/branham_model_api/retrieval/bm25/index.py` - `use_metadata` param
+- `scripts/build_bm25_index.py` - `--no-metadata` flag
+- `scripts/build_faiss_index.py` - `--no-metadata` flag
+- `src/branham_model_api/core/pipeline/fusion.py` - composite scoring, exact match
+- `src/branham_model_api/core/pipeline/expansion.py` - `sermon_order` param
+- `src/branham_model_api/core/pipeline/rag_pipeline.py` - exact match integration
+- `config/default.yaml` - updated thresholds
+
+---
+
+## 2026-01-28
+
+### Reranker Mode Configuration
+
+**Problem**: Reranker added ~100x latency (~10-12s/query vs ~100ms) with marginal quality improvement.
+
+**Solution**: Made reranker configurable via `config/default.yaml`:
+```yaml
+reranker:
+  enabled: never  # Options: always, conditional, never
+```
+
+| Mode | Behavior | Default |
+|------|----------|---------|
+| `never` | Skip reranking (fastest) | **Yes** |
+| `conditional` | Trigger based on signals | No |
+| `always` | Always rerank | No |
+
+**Changes:**
+- `config/default.yaml` - Added `reranker.enabled: never` as default
+- `rag_pipeline.py` - Changed `reranker_enabled: bool` → `reranker_mode: str`
+- `test_rag_pipeline.py` - Added `--reranker` flag for conditional mode
+- `prefetch_hf_model.py` - Added `--skip-reranker` flag
+
+### Exact Match Improvements
+
+**Fixed**: Multiple exact match sermons now all promoted (not just first)
+**Fixed**: Logging clarified ("already in top-8" vs "no retrieved chunks")
+
+### Test Results (20 queries, metadata indices)
+
+| Mode | Total Time | Accuracy |
+|------|------------|----------|
+| `never` | ~9 seconds | Correct #1 sermon for all title/date_id queries |
+| `conditional` | ~3+ minutes | Same accuracy |
+
+**Conclusion**: Metadata-embedded indices make reranker unnecessary for typical queries.
+
+---
+
 ## Status Summary
 
 **Completed**: 
 - Environment setup, project scaffolding, API skeleton, configuration, documentation
 - PDF download, paragraph extraction to SQLite
 - BM25 index build (Stage 3) ✓
-- FAISS index build (Stage 4) ✓
-- Pipeline design finalized (post-benchmark refinements)
+- FAISS index build (Stage 4) with metadata ✓
+- RAG pipeline core components ✓
+  - `chunk_store.py` — SQLite lookup
+  - `signals.py` — Retrieval signals (flatness, overlap, quote intent)
+  - `fusion.py` — RRF fusion, composite scoring, exact match fallback
+  - `expansion.py` — ±1 expansion with sermon order preservation
+  - `rag_pipeline.py` — Main orchestrator
+- Reranker integration (configurable, default disabled) ✓
+- Test harness with 20 queries ✓
 
 **In Progress**:
-- Building the API flow (RAG pipeline implementation)
+- LiteLLM generation integration
 
-**Next Steps** (API Flow Implementation):
-1. `retrieval/store/chunk_store.py` — SQLite chunk store (lookup by chunk_id, date_id)
-2. `core/pipeline/signals.py` — Compute retrieval signals (flatness, overlap, top score)
-3. `core/pipeline/fusion.py` — Merge BM25 + dense, dedup by chunk_id
-4. `core/pipeline/rerank.py` — Conditional reranker invocation
-5. `core/pipeline/expansion.py` — ±1 expansion + dedup
-6. `core/pipeline/postcheck.py` — Reference validation, format compliance
-7. `core/pipeline/rag_pipeline.py` — Main orchestrator
-8. `generation/litellm_client.py` — LiteLLM wrapper
-9. `generation/api_keys.py` — API key rotation
-10. Wire up `/chat` endpoint with full pipeline
+**Next Steps**:
+1. `generation/litellm_client.py` — LiteLLM wrapper
+2. `generation/api_keys.py` — API key rotation
+3. Wire up `/chat` endpoint with full pipeline
+4. `postcheck.py` — Reference validation (optional)
 
 **Future (NOT V1)**:
 - Self-hosted generation model via vLLM
@@ -284,10 +373,10 @@ min_dense_score: 0.55       # Off-topic refusal
 
 ## Architecture Reference (V1)
 
-| Component   | Model                        | Serving       |
-|-------------|------------------------------|---------------|
-| Embedding   | `Qwen/Qwen3-Embedding-0.6B`  | vLLM          |
-| Reranker    | `Qwen/Qwen3-Reranker-0.6B`   | vLLM          |
-| Generation  | External API (configurable)  | LiteLLM       |
+| Component   | Model                        | Serving       | Required |
+|-------------|------------------------------|---------------|----------|
+| Embedding   | `Qwen/Qwen3-Embedding-0.6B`  | vLLM          | Yes |
+| Reranker    | `Qwen/Qwen3-Reranker-0.6B`   | vLLM          | No (default: disabled) |
+| Generation  | External API (configurable)  | LiteLLM       | Yes |
 
 See `.cursor/rules/design_spec.md` for full architecture details.

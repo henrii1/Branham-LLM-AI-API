@@ -190,6 +190,8 @@ class SermonGroup:
 
     date_id: str
     best_score: float  # Highest chunk score in this sermon
+    chunk_count: int  # Number of chunks retrieved from this sermon
+    composite_score: float  # Composite score: chunk_count_normalized + best_score_normalized
     chunks: list[FusedHit]  # Chunks from this sermon, sorted by score desc
 
 
@@ -197,19 +199,27 @@ def collate_by_sermon(
     fused_hits: Sequence[FusedHit],
     *,
     max_sermons: int = 8,
+    chunk_weight: float = 0.5,
+    score_weight: float = 0.5,
 ) -> list[SermonGroup]:
     """
-    Group chunks by sermon (date_id), rank sermons by best chunk score,
+    Group chunks by sermon (date_id), rank sermons by COMPOSITE score,
     and cap at max_sermons.
 
-    This is where truncation happens - we keep only the top N sermons.
+    Composite score = chunk_weight * normalized_chunk_count + score_weight * normalized_best_score
+    
+    This balances:
+    - Sermons with many retrieved chunks (breadth of relevance)
+    - Sermons with high individual chunk scores (depth of relevance)
 
     Args:
         fused_hits: Merged retrieval results
         max_sermons: Maximum number of sermons to keep (default 8)
+        chunk_weight: Weight for chunk count in composite (default 0.5)
+        score_weight: Weight for best score in composite (default 0.5)
 
     Returns:
-        List of SermonGroup, sorted by best_score descending,
+        List of SermonGroup, sorted by composite_score descending,
         capped at max_sermons.
     """
     # Group by date_id (extracted from chunk_id)
@@ -226,20 +236,44 @@ def collate_by_sermon(
             sermons[date_id] = []
         sermons[date_id].append(hit)
 
-    # Create SermonGroups with best score
+    if not sermons:
+        return []
+
+    # Calculate stats for normalization
+    chunk_counts = [len(chunks) for chunks in sermons.values()]
+    max_chunk_count = max(chunk_counts) if chunk_counts else 1
+    
+    best_scores = []
+    for chunks in sermons.values():
+        if chunks:
+            best_scores.append(max(h.score for h in chunks))
+    max_best_score = max(best_scores) if best_scores else 1.0
+
+    # Create SermonGroups with composite score
     groups = []
     for date_id, chunks in sermons.items():
         # Sort chunks by score within sermon
         chunks.sort(key=lambda h: h.score, reverse=True)
         best_score = chunks[0].score if chunks else 0.0
+        chunk_count = len(chunks)
+        
+        # Normalize to 0-1 range
+        norm_chunk_count = chunk_count / max_chunk_count if max_chunk_count > 0 else 0
+        norm_best_score = best_score / max_best_score if max_best_score > 0 else 0
+        
+        # Composite score
+        composite = chunk_weight * norm_chunk_count + score_weight * norm_best_score
+        
         groups.append(SermonGroup(
             date_id=date_id,
             best_score=best_score,
+            chunk_count=chunk_count,
+            composite_score=composite,
             chunks=chunks,
         ))
 
-    # Sort sermons by best score, cap at max_sermons
-    groups.sort(key=lambda g: g.best_score, reverse=True)
+    # Sort sermons by COMPOSITE score, cap at max_sermons
+    groups.sort(key=lambda g: g.composite_score, reverse=True)
     
     selected = groups[:max_sermons]
     total_chunks = sum(len(g.chunks) for g in selected)
@@ -249,7 +283,10 @@ def collate_by_sermon(
         f"{total_chunks} total chunks"
     )
     for i, g in enumerate(selected[:3]):  # Log top 3 sermons
-        logger.debug(f"  Sermon {i+1}: {g.date_id} best_score={g.best_score:.4f} chunks={len(g.chunks)}")
+        logger.debug(
+            f"  Sermon {i+1}: {g.date_id} composite={g.composite_score:.4f} "
+            f"(chunks={g.chunk_count}, best={g.best_score:.4f})"
+        )
     
     return selected
 
@@ -266,3 +303,147 @@ def get_all_chunks_from_sermons(sermon_groups: Sequence[SermonGroup]) -> list[Fu
     # Sort by score for consistent ordering
     result.sort(key=lambda h: h.score, reverse=True)
     return result
+
+
+def extract_date_id_from_query(query: str) -> str | None:
+    """
+    Extract date_id pattern from query if present.
+    
+    Matches patterns like: 65-0711, 63-0318E, 47-0412M
+    """
+    import re
+    # Pattern: YY-MMDD with optional suffix (M, E, A, B, etc.)
+    pattern = r'\b(\d{2}-\d{4}[A-Z]?)\b'
+    match = re.search(pattern, query, re.IGNORECASE)
+    if match:
+        return match.group(1).upper()
+    return None
+
+
+def find_exact_match_sermons(
+    query: str,
+    fused_hits: Sequence[FusedHit],
+    existing_date_ids: set[str],
+    chunk_store,  # ChunkStore instance (for title lookup only)
+) -> list[SermonGroup]:
+    """
+    Promote ALL sermons that were retrieved but didn't make top-8.
+    
+    This does NOT fetch new chunks from DB. It only looks at already-retrieved
+    chunks (from BM25/FAISS) and promotes sermons if they match the query
+    by date_id or title but didn't rank in top-8.
+    
+    Args:
+        query: User query
+        fused_hits: All retrieved chunks from BM25/FAISS fusion
+        existing_date_ids: Set of date_ids already in top-8 results
+        chunk_store: ChunkStore for sermon title lookup only
+        
+    Returns:
+        List of SermonGroups for all matches with retrieved chunks (can be empty)
+    """
+    import sqlite3
+    
+    promoted: list[SermonGroup] = []
+    promoted_date_ids: set[str] = set()
+    
+    # Build map of retrieved chunks by date_id (only chunks NOT in top-8)
+    retrieved_by_sermon: dict[str, list[FusedHit]] = {}
+    for hit in fused_hits:
+        parts = hit.chunk_id.rsplit("_chunk_", 1)
+        if len(parts) != 2:
+            continue
+        date_id = parts[0]
+        if date_id not in existing_date_ids:  # Only consider sermons NOT in top-8
+            if date_id not in retrieved_by_sermon:
+                retrieved_by_sermon[date_id] = []
+            retrieved_by_sermon[date_id].append(hit)
+    
+    if not retrieved_by_sermon:
+        logger.debug("Exact match: no retrieved chunks outside top-8 sermons")
+        return []
+    
+    logger.debug(f"Exact match: {len(retrieved_by_sermon)} sermons with retrieved chunks outside top-8")
+    
+    def promote_sermon(date_id: str, title: str | None = None) -> bool:
+        """Helper to promote a sermon if it has retrieved chunks outside top-8."""
+        title_str = f"'{title}' " if title else ""
+        
+        if date_id in promoted_date_ids:
+            logger.debug(f"Exact match: {title_str}({date_id}) already promoted")
+            return False
+        
+        if date_id in existing_date_ids:
+            logger.debug(f"Exact match: {title_str}({date_id}) already in top-8, no promotion needed")
+            return False
+        
+        if date_id not in retrieved_by_sermon:
+            logger.debug(f"Exact match: {title_str}({date_id}) has no retrieved chunks outside top-8")
+            return False
+        
+        chunks = retrieved_by_sermon[date_id]
+        chunks.sort(key=lambda h: h.score, reverse=True)
+        best_score = chunks[0].score if chunks else 0.0
+        
+        logger.info(
+            f"Exact match: promoting {title_str}({date_id}) "
+            f"({len(chunks)} retrieved chunks, best_score={best_score:.4f})"
+        )
+        
+        promoted.append(SermonGroup(
+            date_id=date_id,
+            best_score=best_score,
+            chunk_count=len(chunks),
+            composite_score=0.0,  # Exact match bonus
+            chunks=chunks,
+        ))
+        promoted_date_ids.add(date_id)
+        return True
+    
+    # 1. Check for date_id in query
+    date_id_in_query = extract_date_id_from_query(query)
+    if date_id_in_query:
+        logger.debug(f"Exact match: query contains date_id '{date_id_in_query}'")
+        promote_sermon(date_id_in_query)
+    
+    # 2. ILIKE search on sermon title - find ALL matching sermons with retrieved chunks
+    conn = sqlite3.connect(chunk_store.db_path, timeout=30.0)
+    try:
+        cur = conn.cursor()
+        
+        # Search for sermon title matching query (case-insensitive)
+        query_words = query.lower().split()
+        stop_words = {'what', 'is', 'the', 'a', 'an', 'in', 'on', 'of', 'to', 'for', 'and', 'or', 'about', 'did', 'say', 'sermon', 'message', 'tell', 'me', 'explain'}
+        search_words = [w for w in query_words if w not in stop_words and len(w) > 2]
+        
+        if not search_words:
+            logger.debug("Exact match: no search words for title matching")
+            return promoted
+        
+        logger.debug(f"Exact match: searching titles for words {search_words}")
+        
+        # Build LIKE clauses for each word
+        like_clauses = " AND ".join([f"LOWER(title) LIKE ?" for _ in search_words])
+        params = [f"%{w}%" for w in search_words]
+        
+        # Get ALL matching sermons (not limited)
+        cur.execute(f"""
+            SELECT date_id, title 
+            FROM sermons 
+            WHERE {like_clauses}
+        """, params)
+        
+        for row in cur.fetchall():
+            found_date_id, found_title = row
+            logger.debug(f"Exact match: title match '{found_title}' ({found_date_id})")
+            promote_sermon(found_date_id, found_title)
+        
+        if not promoted:
+            logger.debug("Exact match: no matches with retrieved chunks")
+        else:
+            logger.info(f"Exact match: promoted {len(promoted)} sermons total")
+        
+        return promoted
+        
+    finally:
+        conn.close()

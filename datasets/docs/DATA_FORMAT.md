@@ -156,7 +156,9 @@ CREATE TABLE chunks (
   chunk_index INTEGER,
   text TEXT,
   word_count INTEGER,
-  char_count INTEGER
+  char_count INTEGER,
+  sermon_title TEXT,         -- Sermon title (joined from sermons table)
+  text_with_metadata TEXT    -- Composite text for indexing (includes metadata header)
 );
 
 -- Indexes for fast retrieval
@@ -170,9 +172,15 @@ CREATE INDEX idx_chunks_range ON chunks(date_id, paragraph_start, paragraph_end)
 - `paragraph_start`: Starting paragraph number (inclusive)
 - `paragraph_end`: Ending paragraph number (inclusive)
 - `chunk_index`: Position within sermon (0 to N-1, for expansion logic)
-- `text`: The actual chunk text
+- `text`: The actual chunk text (raw)
 - `word_count`: Word count (for budgeting and analysis)
 - `char_count`: Character count (for budgeting and analysis)
+- `sermon_title`: Sermon title from sermons table (for display and indexing)
+- `text_with_metadata`: Composite text for BM25/FAISS indexing, format:
+  ```
+  [Sermon: {title} | ID: {date_id} | ¶{para_start}-{para_end}]
+  {text}
+  ```
 
 ---
 

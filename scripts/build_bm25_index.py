@@ -108,6 +108,11 @@ def main() -> None:
         action="store_true",
         help="Write bm25_vocab.json (debugging aid; optional)",
     )
+    parser.add_argument(
+        "--no-metadata",
+        action="store_true",
+        help="Use raw text instead of text_with_metadata (not recommended).",
+    )
 
     args = parser.parse_args()
 
@@ -125,10 +130,13 @@ def main() -> None:
         remove_stopwords=bool(args.remove_stopwords),
     )
 
+    use_metadata = not bool(args.no_metadata)
+    
     print(f"Reading chunks from: {db_path}")
     print(f"Writing BM25 artifacts to: {out_dir}")
     print(f"BM25 params: k1={args.k1}, b={args.b}")
     print(f"Preprocess: {preprocess_cfg.to_dict()}")
+    print(f"Text source: {'text_with_metadata (includes sermon title, date_id, ¶markers)' if use_metadata else 'raw text'}")
     if args.limit is not None:
         print(f"LIMIT: indexing first {args.limit} chunks only")
     print("=" * 70)
@@ -139,6 +147,7 @@ def main() -> None:
         b=float(args.b),
         preprocess_cfg=preprocess_cfg,
         limit=args.limit,
+        use_metadata=use_metadata,
     )
 
     out_dir.mkdir(parents=True, exist_ok=True)

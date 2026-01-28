@@ -26,12 +26,8 @@ from huggingface_hub import snapshot_download
 
 
 # Production models for Branham Model API
-PRODUCTION_MODELS = [
-    # Embedding model (Stage 4 - dense retrieval)
-    "Qwen/Qwen3-Embedding-0.6B",
-    # Reranker model (conditional reranking)
-    "Qwen/Qwen3-Reranker-0.6B",
-]
+EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"  # Required: dense retrieval
+RERANKER_MODEL = "Qwen/Qwen3-Reranker-0.6B"    # Optional: only if reranker.enabled != "never"
 
 
 def prefetch_model(
@@ -70,7 +66,12 @@ def main() -> None:
     parser.add_argument(
         "--all",
         action="store_true",
-        help="Prefetch all production models (embedding + reranker)",
+        help="Prefetch all production models (embedding + reranker unless --skip-reranker)",
+    )
+    parser.add_argument(
+        "--skip-reranker",
+        action="store_true",
+        help="Skip reranker model download (use when reranker.enabled=never in config)",
     )
     parser.add_argument(
         "--revision",
@@ -108,8 +109,12 @@ def main() -> None:
 
     models_to_fetch = []
     if args.all:
-        models_to_fetch = PRODUCTION_MODELS
-        print(f"Prefetching all production models ({len(models_to_fetch)} models)")
+        models_to_fetch = [EMBEDDING_MODEL]
+        if not args.skip_reranker:
+            models_to_fetch.append(RERANKER_MODEL)
+        else:
+            print("Skipping reranker (--skip-reranker flag)")
+        print(f"Prefetching {len(models_to_fetch)} production model(s)")
     elif args.model_id:
         models_to_fetch = [args.model_id]
 

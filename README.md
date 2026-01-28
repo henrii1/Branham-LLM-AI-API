@@ -56,11 +56,25 @@ See `.cursor/rules/design_spec.md` for the complete V1 architecture and reposito
 
 ### V1 Architecture Summary
 
-| Component   | Model                        | Serving       |
-|-------------|------------------------------|---------------|
-| Embedding   | `Qwen/Qwen3-Embedding-0.6B`  | vLLM          |
-| Reranker    | `Qwen/Qwen3-Reranker-0.6B`   | vLLM          |
-| Generation  | External API (configurable)  | LiteLLM       |
+| Component   | Model                        | Serving       | Required |
+|-------------|------------------------------|---------------|----------|
+| Embedding   | `Qwen/Qwen3-Embedding-0.6B`  | vLLM          | Yes |
+| Reranker    | `Qwen/Qwen3-Reranker-0.6B`   | vLLM          | No (disabled by default) |
+| Generation  | External API (configurable)  | LiteLLM       | Yes |
+
+### Configuration
+
+All settings are in `config/default.yaml`. Key retrieval settings:
+
+```yaml
+retrieval:
+  reranker:
+    enabled: never  # Options: always, conditional, never
+  collation:
+    max_sermons: 8
+  refusal:
+    min_dense_score: 0.55
+```
 
 ### Dependencies
 

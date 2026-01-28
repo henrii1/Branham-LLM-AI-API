@@ -46,16 +46,31 @@ from branham_model_api.retrieval.dense.index_faiss import (
 
 
 def iter_chunks_from_sqlite(
-    db_path: Path, *, limit: Optional[int] = None
+    db_path: Path,
+    *,
+    limit: Optional[int] = None,
+    use_metadata: bool = True,
 ) -> Iterator[tuple[str, str]]:
+    """
+    Iterate over chunks from SQLite database.
+    
+    Args:
+        db_path: Path to chunks.sqlite
+        limit: Optional limit on number of chunks
+        use_metadata: If True, use text_with_metadata column (includes sermon title, date_id, paragraph markers).
+                      If False, use raw text column.
+    """
     conn = sqlite3.connect(db_path, timeout=60.0)
     try:
         conn.execute("PRAGMA busy_timeout = 60000;")
         conn.execute("PRAGMA journal_mode = WAL;")
         conn.execute("PRAGMA synchronous = NORMAL;")
         cur = conn.cursor()
-        sql = """
-        SELECT chunk_id, text
+        
+        # Use text_with_metadata for better retrieval (includes sermon title, date_id, ¶markers)
+        text_col = "text_with_metadata" if use_metadata else "text"
+        sql = f"""
+        SELECT chunk_id, {text_col}
         FROM chunks
         ORDER BY date_id ASC, chunk_index ASC, chunk_id ASC
         """
@@ -183,6 +198,11 @@ def main() -> None:
         action="store_true",
         help="Optional: write embeddings.npy for debugging (large). Not used at serving time.",
     )
+    parser.add_argument(
+        "--no-metadata",
+        action="store_true",
+        help="Use raw text instead of text_with_metadata (not recommended).",
+    )
 
     args = parser.parse_args()
 
@@ -247,11 +267,13 @@ def main() -> None:
     print("=" * 70)
 
     # Read chunks deterministically and hash raw corpus.
+    use_metadata = not bool(args.no_metadata)
     corpus_hasher = hashlib.sha256()
-    corpus_hash_input = "chunk_id + NUL + raw_text"
+    corpus_hash_input = "chunk_id + NUL + text_with_metadata" if use_metadata else "chunk_id + NUL + raw_text"
     chunk_ids: list[str] = []
     texts: list[str] = []
-    for chunk_id, text in iter_chunks_from_sqlite(db_path, limit=args.limit):
+    print(f"Text source: {'text_with_metadata (includes sermon title, date_id, ¶markers)' if use_metadata else 'raw text'}")
+    for chunk_id, text in iter_chunks_from_sqlite(db_path, limit=args.limit, use_metadata=use_metadata):
         corpus_hasher.update(chunk_id.encode("utf-8"))
         corpus_hasher.update(b"\x00")
         corpus_hasher.update(text.encode("utf-8"))

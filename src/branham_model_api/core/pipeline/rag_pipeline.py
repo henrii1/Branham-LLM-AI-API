@@ -39,6 +39,7 @@ from branham_model_api.core.pipeline.fusion import (
     SermonGroup,
     apply_rerank_scores,
     collate_by_sermon,
+    find_exact_match_sermons,
     merge_bm25_dense,
 )
 from branham_model_api.core.pipeline.signals import (
@@ -90,28 +91,54 @@ class RerankerProtocol(Protocol):
 
 @dataclass
 class RetrievalConfig:
-    """Configuration for retrieval pipeline."""
+    """Configuration for retrieval pipeline.
+    
+    Default values match config/default.yaml. Use from_yaml() to load from config file.
+    """
 
     # Retrieval parameters
     bm25_top_n: int = 25
     dense_top_n: int = 25
 
-    # Reranker trigger thresholds (adjusted based on observed data)
-    # Note: Original thresholds (0.08, 3, 0.65) were too strict - triggered on every query
-    reranker_enabled: bool = True
-    score_std_threshold: float = 0.015  # Very flat distribution (typical is 0.01-0.05)
-    overlap_threshold: int = 1  # No agreement at all (typical is 0-3)
-    top_score_threshold: float = 0.55  # Weak semantic match
+    # Reranker mode: "always", "conditional", "never"
+    # - never: Skip reranking entirely (fastest, default)
+    # - conditional: Trigger based on signals (std, overlap, quote_intent)
+    # - always: Always rerank (slowest, marginal quality improvement)
+    reranker_mode: str = "never"
+    
+    # Reranker trigger thresholds (only used when reranker_mode="conditional")
+    score_std_threshold: float = 0.015
+    overlap_threshold: int = 1
+    top_score_threshold: float = 0.55
 
     # Collation
     max_sermons: int = 8
 
-    # Expansion
-    expansion_delta: int = 1
+    # Expansion (0=disabled, 1=±1 adjacent chunks)
+    expansion_delta: int = 0
 
     # Refusal threshold - based on DENSE score (semantic similarity)
-    # Dense scores: 0.7+ strong match, 0.5-0.7 moderate, <0.5 weak/off-topic
-    min_dense_score: float = 0.50  # Below this = likely off-topic
+    min_dense_score: float = 0.55
+    
+    @classmethod
+    def from_yaml(cls) -> "RetrievalConfig":
+        """Load config from config/default.yaml."""
+        from branham_model_api.config import get_config
+        
+        cfg = get_config()
+        ret = cfg.retrieval
+        
+        return cls(
+            bm25_top_n=ret.bm25_top_n,
+            dense_top_n=ret.dense_top_n,
+            reranker_mode=ret.reranker.enabled,
+            score_std_threshold=ret.reranker.score_std_threshold,
+            overlap_threshold=ret.reranker.overlap_threshold,
+            top_score_threshold=ret.reranker.top_score_threshold,
+            max_sermons=ret.max_sermons,
+            expansion_delta=ret.expansion_delta,
+            min_dense_score=ret.min_dense_score,
+        )
 
 
 @dataclass
@@ -248,7 +275,9 @@ class RAGPipeline:
         hits = results[0] if results else []
         logger.info(f"Dense: embed={embed_elapsed:.1f}ms, search={search_elapsed:.1f}ms, {len(hits)} hits")
         if hits:
-            logger.debug(f"  Top Dense: faiss_id={hits[0].faiss_id} score={hits[0].score:.4f}")
+            # Log chunk_id instead of faiss_id
+            top_chunk_id = self.faiss_id_map.get(hits[0].faiss_id, f"faiss:{hits[0].faiss_id}")
+            logger.debug(f"  Top Dense: {top_chunk_id} score={hits[0].score:.4f}")
         return hits
 
     def _run_reranker(
@@ -329,22 +358,47 @@ class RAGPipeline:
         # 4. Fusion + dedup
         fused_hits = merge_bm25_dense(bm25_hits, dense_hits, self.faiss_id_map)
 
-        # 5. Conditional reranker
+        # 5. Reranker (based on reranker_mode: never/conditional/always)
         reranker_triggered = False
-        if config.reranker_enabled and self.reranker is not None:
-            should_rerank = signals.should_rerank(
-                score_std_threshold=config.score_std_threshold,
-                overlap_threshold=config.overlap_threshold,
-                top_score_threshold=config.top_score_threshold,
-            )
+        if self.reranker is not None and config.reranker_mode != "never":
+            should_rerank = False
+            
+            if config.reranker_mode == "always":
+                should_rerank = True
+                logger.info("Reranker TRIGGERED: mode=always")
+            elif config.reranker_mode == "conditional":
+                should_rerank = signals.should_rerank(
+                    score_std_threshold=config.score_std_threshold,
+                    overlap_threshold=config.overlap_threshold,
+                    top_score_threshold=config.top_score_threshold,
+                )
+            
             if should_rerank:
                 reranker_triggered = True
                 rerank_scores = self._run_reranker(query_normalized, fused_hits)
                 if rerank_scores:
                     fused_hits = apply_rerank_scores(fused_hits, rerank_scores)
+        elif config.reranker_mode == "never":
+            logger.debug("Reranker skipped: mode=never")
 
         # 6. Collate by sermon, cap at max_sermons
         sermon_groups = collate_by_sermon(fused_hits, max_sermons=config.max_sermons)
+        
+        # 6b. Exact match fallback: if query mentions specific sermon by ID or title,
+        # promote ALL matching sermons from retrieved chunks (not from DB) if they didn't make top 8
+        existing_date_ids = {g.date_id for g in sermon_groups}
+        exact_matches = find_exact_match_sermons(
+            query_normalized,
+            fused_hits,  # Only look at already-retrieved chunks
+            existing_date_ids,
+            self.chunk_store,  # For title lookup only
+        )
+        if exact_matches:
+            sermon_groups.extend(exact_matches)
+            logger.info(
+                f"Promoted {len(exact_matches)} exact match sermons: "
+                + ", ".join(f"{m.date_id}({m.chunk_count})" for m in exact_matches)
+            )
 
         # 7. Check for refusal (based on DENSE score for semantic relevance)
         should_refuse = False
@@ -369,11 +423,15 @@ class RAGPipeline:
             for group in sermon_groups:
                 all_sermon_chunks.extend(group.chunks)
 
+            # Preserve sermon order from collation (ranked by composite score)
+            sermon_order = [g.date_id for g in sermon_groups]
+
             # Expand
             expanded_sermons = expand_and_group(
                 all_sermon_chunks,
                 self.chunk_store,
                 delta=config.expansion_delta,
+                sermon_order=sermon_order,  # Preserve composite score ranking
             )
 
             # Count total chunks

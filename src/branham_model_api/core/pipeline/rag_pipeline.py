@@ -25,6 +25,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, Sequence
 
+from concurrent.futures import ThreadPoolExecutor
+
 import faiss
 import numpy as np
 
@@ -117,8 +119,12 @@ class RetrievalConfig:
     # Expansion (0=disabled, 1=±1 adjacent chunks)
     expansion_delta: int = 0
 
-    # Refusal threshold - based on DENSE score (semantic similarity)
-    min_dense_score: float = 0.55
+    # Conservative refusal thresholds
+    min_dense_score: float = 0.20
+    min_bm25_score: float = 0.20
+
+    # Language detection: "never" or "auto"
+    language_detection_mode: str = "never"
     
     @classmethod
     def from_yaml(cls) -> "RetrievalConfig":
@@ -138,6 +144,8 @@ class RetrievalConfig:
             max_sermons=ret.max_sermons,
             expansion_delta=ret.expansion_delta,
             min_dense_score=ret.min_dense_score,
+            min_bm25_score=ret.min_bm25_score,
+            language_detection_mode=ret.language_detection_mode,
         )
 
 
@@ -172,6 +180,94 @@ class RetrievalResult:
 # -----------------------------------------------------------------------------
 # Query preprocessing
 # -----------------------------------------------------------------------------
+
+
+# -----------------------------------------------------------------------------
+# Language Detection (langid)
+# -----------------------------------------------------------------------------
+
+# Track if langid is available
+_langid_available: bool | None = None
+
+
+def detect_query_language(query: str, *, use_langid: bool = True) -> str:
+    """
+    Detect query language.
+
+    When *use_langid* is True, uses the langid library (~1-5 ms after warm-up).
+    When False (or langid unavailable), falls back to character-based heuristics.
+
+    Returns:
+        "en" for English (use BM25)
+        "non-en" for non-English (skip BM25, use dense only)
+    """
+    global _langid_available
+
+    if use_langid and (_langid_available is None or _langid_available):
+        try:
+            import langid
+            _langid_available = True
+
+            clean_query = query.strip()
+            if not clean_query:
+                return "en"
+
+            lang_code, score = langid.classify(clean_query)
+            logger.debug(f"langid detected: {lang_code} (score={score:.2f})")
+            return "en" if lang_code == "en" else "non-en"
+        except ImportError:
+            _langid_available = False
+            logger.warning("langid not installed, using character-based detection")
+        except Exception as e:
+            logger.debug(f"langid prediction failed: {e}")
+
+    return _detect_language_by_chars(query)
+
+
+def _detect_language_by_chars(query: str) -> str:
+    """
+    Fallback: detect query language using character analysis.
+    Used when FastText model is not available.
+    """
+    import unicodedata
+    
+    # Quick check for Spanish/French punctuation
+    if any(c in query for c in "¿¡«»"):
+        return "non-en"
+    
+    # Count character types
+    total_alpha = 0
+    non_latin = 0
+    latin_with_diacritics = 0
+    
+    for char in query:
+        if not char.isalpha():
+            continue
+        total_alpha += 1
+        
+        try:
+            name = unicodedata.name(char, "")
+        except ValueError:
+            name = ""
+        
+        # Check for non-Latin scripts
+        if any(script in name for script in [
+            "CJK", "HIRAGANA", "KATAKANA", "HANGUL",
+            "CYRILLIC", "ARABIC", "HEBREW",
+            "THAI", "DEVANAGARI", "BENGALI", "GREEK",
+        ]):
+            non_latin += 1
+        elif "LATIN" in name and "WITH" in name:
+            latin_with_diacritics += 1
+    
+    if total_alpha == 0:
+        return "en"
+    if non_latin > 0:
+        return "non-en"
+    if latin_with_diacritics > 0:
+        return "non-en"
+    
+    return "en"
 
 
 def normalize_query(query: str) -> str:
@@ -323,12 +419,19 @@ class RAGPipeline:
         
         return scores
 
-    def retrieve(self, query: str) -> RetrievalResult:
+    def retrieve(
+        self,
+        query: str,
+        *,
+        user_language: str | None = None,
+    ) -> RetrievalResult:
         """
         Execute the full retrieval pipeline.
 
         Args:
             query: User query
+            user_language: Optional ISO language code from frontend (e.g. "en", "es").
+                           When provided, langid is not invoked regardless of config.
 
         Returns:
             RetrievalResult with context-ready sermons
@@ -338,14 +441,35 @@ class RAGPipeline:
         
         logger.info(f"=== RETRIEVE START: '{query[:80]}{'...' if len(query) > 80 else ''}' ===")
 
-        # 1. Normalize query
+        # 1. Normalize query and detect language
         query_normalized = normalize_query(query)
         quote_intent = detect_quote_intent(query_normalized)
-        logger.debug(f"Query normalized, quote_intent={quote_intent}")
 
-        # 2. Parallel retrieval (BM25 + Dense)
-        bm25_hits = self._run_bm25(query_normalized)
-        dense_hits = self._run_dense(query_normalized)
+        if user_language:
+            query_lang = "en" if user_language.lower().startswith("en") else "non-en"
+            logger.debug(f"Language from frontend: user_language={user_language} -> {query_lang}")
+        elif config.language_detection_mode == "auto":
+            query_lang = detect_query_language(query_normalized, use_langid=True)
+        else:
+            # mode=never and no FE language -> skip BM25 (safe default: dense-only)
+            query_lang = "unknown"
+            logger.debug("langid disabled (mode=never) and no user_language; BM25 will be skipped")
+
+        logger.debug(f"Query normalized, quote_intent={quote_intent}, lang={query_lang}")
+
+        # 2. Parallel retrieval (BM25 + Dense via ThreadPoolExecutor)
+        run_bm25 = query_lang == "en"
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            dense_future = pool.submit(self._run_dense, query_normalized)
+            if run_bm25:
+                bm25_future = pool.submit(self._run_bm25, query_normalized)
+                bm25_hits = bm25_future.result()
+            else:
+                bm25_hits = []
+                if query_lang != "unknown":
+                    logger.debug("BM25 skipped: query language detected as non-English")
+            dense_hits = dense_future.result()
 
         # 3. Compute retrieval signals
         signals = compute_signals(
@@ -404,14 +528,40 @@ class RAGPipeline:
         should_refuse = False
         refuse_reason = None
         dense_top = signals.dense_top_score
+        bm25_top = bm25_hits[0].score if bm25_hits else 0.0
 
         if not fused_hits:
             should_refuse = True
             refuse_reason = "No relevant chunks found"
+        elif query_lang == "en":
+            dense_weak = dense_top < config.min_dense_score
+            bm25_weak = bm25_top < config.min_bm25_score
+            # English refusal is conservative: both dense and BM25 must be weak.
+            if dense_weak and bm25_weak:
+                should_refuse = True
+                refuse_reason = (
+                    "Query appears off-topic "
+                    f"(dense_score={dense_top:.3f} < {config.min_dense_score}, "
+                    f"bm25_score={bm25_top:.3f} < {config.min_bm25_score})"
+                )
+                logger.info(
+                    "Refusal: dense_top=%.4f < %.4f AND bm25_top=%.4f < %.4f",
+                    dense_top,
+                    config.min_dense_score,
+                    bm25_top,
+                    config.min_bm25_score,
+                )
         elif dense_top < config.min_dense_score:
             should_refuse = True
-            refuse_reason = f"Query appears off-topic (dense_score={dense_top:.3f} < {config.min_dense_score})"
-            logger.info(f"Refusal: dense_top={dense_top:.4f} < threshold={config.min_dense_score}")
+            refuse_reason = (
+                "Query appears off-topic "
+                f"(dense_score={dense_top:.3f} < {config.min_dense_score})"
+            )
+            logger.info(
+                "Refusal: dense_top=%.4f < threshold=%.4f",
+                dense_top,
+                config.min_dense_score,
+            )
 
         # 8. Expand chunks ±1 (only if not refusing)
         expanded_sermons: list[ExpandedSermon] = []

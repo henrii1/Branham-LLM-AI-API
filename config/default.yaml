@@ -18,6 +18,10 @@ api:
   port: 8000
   workers: 1
   log_level: info
+  # Required bearer token for POST /api/chat.
+  # FE must send: Authorization: Bearer <token>
+  # Can be overridden via env: CHAT_API_BEARER_KEY
+  bearer_key: b6766b2e-9a26-4342-9bef-5da4ad67e51c
   cors_origins:
     - "*"
 
@@ -25,8 +29,25 @@ api:
 models:
   embedding_model_id: Qwen/Qwen3-Embedding-0.6B  # 32k context, 1024 dim, multilingual
   reranker_model_id: Qwen/Qwen3-Reranker-0.6B    # Paired with embedding model
-  generator_model_id: null  # To be configured (via LiteLLM)
   tokenizer_model_id: null  # To be configured
+
+# LLM Provider Configuration
+# Switch between providers by changing `llm.provider`.
+# Each provider has its own model name, base_url, and key_prefix.
+# Keys follow the pattern: {key_prefix}_A .. {key_prefix}_E
+llm:
+  provider: openrouter  # "openrouter" or "deepseek"
+  temperature: 0.2
+  timeout: 30.0
+  providers:
+    openrouter:
+      model: openrouter/deepseek/deepseek-chat
+      base_url: https://openrouter.ai/api/v1
+      key_prefix: OPENROUTER_API_KEY
+    deepseek:
+      model: deepseek/deepseek-chat
+      base_url: https://api.deepseek.com
+      key_prefix: DEEPSEEK_API_KEY
 
 # Retrieval Configuration
 retrieval:
@@ -94,10 +115,17 @@ retrieval:
     max_sermons: 8  # Cap at 8 unique sermons (date_ids)
   expansion:
     depth: 0  # 0=disabled, 1=±1 adjacent chunks. Sermon Lookup Tool handles more context.
+  language_detection:
+    # Controls langid usage for query language detection.
+    # "never"  – rely on frontend-provided user_language; skip langid entirely (default, saves ~800ms cold start)
+    # "auto"   – use langid when frontend does not send user_language; pre-load model at container startup
+    mode: never
   refusal:
-    # Refusal based on DENSE score (semantic similarity, 0-1 range)
-    # Dense scores: 0.7+ strong, 0.55-0.7 moderate, <0.55 weak/off-topic
-    min_dense_score: 0.55  # Below this = likely off-topic query
+    # Conservative pre-LLM refusal guardrails (reduced to avoid valid-query refusals):
+    # - English queries refuse only when BOTH dense and BM25 are below thresholds.
+    # - Non-English queries use dense threshold only (BM25 is skipped).
+    min_dense_score: 0.20
+    min_bm25_score: 0.20
 
 # Chunking Configuration (Section 5.1)
 chunking:

@@ -5,19 +5,17 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+class ExternalInfo(BaseModel):
+    """External information metadata (present only when web search is used)."""
 
-class Reference(BaseModel):
-    """
-    Reference to a sermon chunk.
-    
-    As per Section 10.1 and 1.2 (canonical reference system).
-    """
-
-    date_id: str = Field(..., description="Sermon date ID (dd-mm-yy--M/E)")
-    paragraph_start: int = Field(..., description="Starting paragraph number")
-    paragraph_end: int = Field(..., description="Ending paragraph number")
-    chunk_ids: list[str] = Field(..., description="List of chunk IDs used")
-    sermon_title: str | None = Field(default=None, description="Optional sermon title")
+    disclaimer: str = Field(
+        ...,
+        description="Disclosure that content is from external/unverified sources",
+    )
+    sources: list[str] = Field(
+        ...,
+        description="External source URLs in markdown-friendly format",
+    )
 
 
 class ChatResponse(BaseModel):
@@ -28,30 +26,26 @@ class ChatResponse(BaseModel):
     """
 
     answer: str = Field(..., description="Generated answer with inline references")
-    mode: Literal["quote", "synthesis", "refusal"] = Field(
-        ..., 
-        description="Response mode: quote (direct quote), synthesis (narrative), refusal (can't answer)"
+    mode: Literal["answer", "refusal", "error"] = Field(
+        ...,
+        description="Final response mode"
     )
-    references: list[Reference] = Field(
-        ..., 
-        description="List of sermon references used to ground the answer"
+    external_info: ExternalInfo | None = Field(
+        default=None,
+        description="Present only when external web tool data was used",
+    )
+    conversation_summary: str | None = Field(
+        default=None,
+        description="Optional compact summary for frontend memory handoff",
     )
 
     model_config = {
         "json_schema_extra": {
             "examples": [
                 {
-                    "answer": "Brother Branham explained the third pull in [47-0412--M: ¶12–¶15]...",
-                    "mode": "synthesis",
-                    "references": [
-                        {
-                            "date_id": "47-0412--M",
-                            "paragraph_start": 12,
-                            "paragraph_end": 15,
-                            "chunk_ids": ["47-0412--M_chunk_003", "47-0412--M_chunk_004"],
-                            "sermon_title": "Faith Is The Substance",
-                        }
-                    ],
+                    "answer": "Brother Branham explained the third pull in [47-0412M: ¶12–¶15]...",
+                    "mode": "answer",
+                    "conversation_summary": "Conversation has focused on third pull definition and context sermons from 1963.",
                 }
             ]
         }

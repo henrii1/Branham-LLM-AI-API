@@ -11,13 +11,21 @@ Tests 20 queries covering:
 
 Usage:
     uv run python scripts/test_rag_pipeline.py
-    uv run python scripts/test_rag_pipeline.py --use-new-indices  # After rebuild
 """
 
 import argparse
 import logging
+import os
+import platform
 import sys
 from pathlib import Path
+
+# macOS dev workaround:
+# Some FAISS/Torch combinations load duplicate OpenMP runtimes and abort with
+# "Initializing libomp.dylib, but found libomp.dylib already initialized."
+# Setting this only for Darwin allows the process to continue for local testing.
+if platform.system() == "Darwin":
+    os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -42,37 +50,41 @@ logging.getLogger("branham_model_api.core.pipeline").setLevel(logging.DEBUG)
 
 logger = logging.getLogger(__name__)
 
-# Test queries - 20 total
+# Test queries - Multilingual (15 total)
+# Format: (query, english_translation, language)
 TEST_QUERIES = [
-    # === General sermon questions (5) ===
-    "What did Brother Branham teach about faith?",
-    "Explain the seven church ages",
-    "What is the third pull?",
-    "Tell me about the pillar of fire",
-    "What did Branham say about healing?",
+    # === Spanish ===
+    ("¿Qué enseñó el Hermano Branham sobre la fe?", "What did Brother Branham teach about faith?", "Spanish"),
+    ("Explica las siete edades de la iglesia", "Explain the seven church ages", "Spanish"),
     
-    # === Quote-seeking queries - should trigger reranker (5) ===
-    "What exact quote did Brother Branham say about the rapture?",
-    "Where did he say 'thus saith the Lord'?",
-    "Which sermon talks about the seven seals?",
-    "What did Brother Branham say in paragraph 45 of 65-1128M?",
-    "Quote from the sermon on faith",
+    # === French ===
+    ("Qu'est-ce que la troisième traction?", "What is the third pull?", "French"),
+    ("Parlez-moi de la colonne de feu", "Tell me about the pillar of fire", "French"),
     
-    # === Specific sermon references (should find via exact match) (3) ===
-    "What is taught in 65-0711 sermon?",
-    "Explain the message from 63-0318",
-    "Tell me about the Spoken Word Is The Original Seed sermon",
+    # === German ===
+    ("Was hat Branham über Heilung gesagt?", "What did Branham say about healing?", "German"),
+    ("Erkläre die sieben Siegel", "Explain the seven seals", "German"),
     
-    # === Theological questions (4) ===
-    "What is the serpent's seed doctrine?",
-    "Explain predestination according to Branham",
-    "What are the seven thunders?",
-    "What happened in the 1933 vision?",
+    # === Portuguese ===
+    ("O que é a doutrina da semente da serpente?", "What is the serpent's seed doctrine?", "Portuguese"),
+    ("Explique a predestinação segundo Branham", "Explain predestination according to Branham", "Portuguese"),
     
-    # === Out-of-domain / should refuse (3) ===
-    "What is the weather like today?",
-    "How do I cook pasta?",
-    "Tell me about quantum physics",
+    # === Chinese (Simplified) ===
+    ("伯兰罕弟兄关于信心的教导是什么？", "What did Brother Branham teach about faith?", "Chinese"),
+    ("什么是火柱？", "What is the pillar of fire?", "Chinese"),
+    
+    # === Korean ===
+    ("일곱 교회 시대에 대해 설명해 주세요", "Explain the seven church ages", "Korean"),
+    
+    # === Russian ===
+    ("Что брат Бранхам говорил об исцелении?", "What did Brother Branham say about healing?", "Russian"),
+    
+    # === English (baseline) ===
+    ("What are the seven thunders?", "What are the seven thunders?", "English"),
+    
+    # === Out-of-domain / should refuse (multilingual) ===
+    ("Comment cuisiner des pâtes?", "How do I cook pasta?", "French"),
+    ("Cuéntame sobre la física cuántica", "Tell me about quantum physics", "Spanish"),
 ]
 
 
@@ -81,10 +93,14 @@ def run_test(
     query: str,
     query_num: int,
     faiss_id_map: dict[int, str],
+    english: str | None = None,
+    language: str = "English",
 ) -> dict:
     """Run a single test query and return summary stats."""
     print(f"\n{'='*80}")
-    print(f"QUERY {query_num}: {query}")
+    print(f"QUERY {query_num} [{language}]: {query}")
+    if english and language != "English":
+        print(f"  (English: {english})")
     print("="*80)
     
     result = pipeline.retrieve(query)
@@ -92,6 +108,8 @@ def run_test(
     # Summary
     summary = {
         "query": query,
+        "english": english or query,
+        "language": language,
         "quote_intent": result.quote_intent,
         "reranker_triggered": result.reranker_triggered,
         "should_refuse": result.should_refuse,
@@ -147,11 +165,6 @@ def run_test(
 def main():
     parser = argparse.ArgumentParser(description="Test RAG pipeline")
     parser.add_argument(
-        "--use-new-indices",
-        action="store_true",
-        help="Use new indices (after rebuild with metadata). Default uses old v1_text_only indices.",
-    )
-    parser.add_argument(
         "--reranker",
         action="store_true",
         help="Enable reranker (Qwen3-Reranker-0.6B). Slower but potentially better ranking.",
@@ -162,18 +175,11 @@ def main():
     data_dir = Path(__file__).parent.parent / "data"
     indices_dir = data_dir / "indices"
     processed_dir = data_dir / "processed"
-    
-    # Choose index files based on flag
-    if args.use_new_indices:
-        bm25_path = indices_dir / "bm25.index"
-        faiss_path = indices_dir / "faiss.index"
-        faiss_id_map_path = indices_dir / "faiss_id_map.jsonl"
-        print("Using NEW indices (with metadata)")
-    else:
-        bm25_path = indices_dir / "bm25_v1_text_only.index"
-        faiss_path = indices_dir / "faiss_v1_text_only.index"
-        faiss_id_map_path = indices_dir / "faiss_v1_text_only_id_map.jsonl"
-        print("Using OLD indices (v1_text_only, no metadata)")
+
+    bm25_path = indices_dir / "bm25.index"
+    faiss_path = indices_dir / "faiss.index"
+    faiss_id_map_path = indices_dir / "faiss_id_map.jsonl"
+    print("Using current indices (metadata-enabled)")
     
     print("="*80)
     print("RAG PIPELINE TEST")
@@ -250,13 +256,14 @@ def main():
     
     # Run tests
     results = []
-    for i, query in enumerate(TEST_QUERIES, 1):
+    for i, query_tuple in enumerate(TEST_QUERIES, 1):
+        query, english, language = query_tuple
         try:
-            summary = run_test(pipeline, query, i, faiss_id_map)
+            summary = run_test(pipeline, query, i, faiss_id_map, english=english, language=language)
             results.append(summary)
         except Exception as e:
             logger.error(f"Query {i} failed: {e}", exc_info=True)
-            results.append({"query": query, "error": str(e)})
+            results.append({"query": query, "english": english, "language": language, "error": str(e)})
     
     # Final summary
     print("\n" + "="*80)
@@ -269,11 +276,21 @@ def main():
     reranked = sum(1 for r in results if r.get("reranker_triggered", False))
     quote_intents = sum(1 for r in results if r.get("quote_intent", False))
     
+    # Language breakdown
+    from collections import Counter
+    lang_counts = Counter(r.get("language", "Unknown") for r in results)
+    lang_refused = Counter(r.get("language", "Unknown") for r in results if r.get("should_refuse", False))
+    
     print(f"Total queries: {total}")
     print(f"Errors: {errors}")
     print(f"Refused: {refused}")
     print(f"Reranker triggered: {reranked}")
     print(f"Quote intent detected: {quote_intents}")
+    
+    print(f"\nLanguage breakdown:")
+    for lang, count in sorted(lang_counts.items()):
+        refused_count = lang_refused.get(lang, 0)
+        print(f"  {lang}: {count} queries ({refused_count} refused)")
     
     # Signal statistics
     valid_results = [r for r in results if "signals" in r]

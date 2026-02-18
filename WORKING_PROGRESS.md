@@ -338,6 +338,52 @@ reranker:
 
 ---
 
+## 2026-01-29
+
+### Language Detection & BM25 Skip for Non-English Queries
+
+**Problem**: BM25 is keyword-based (English corpus). Non-English queries returned irrelevant BM25 hits that polluted fusion results:
+- Spanish "Explica las siete edades": BM25 matched random substrings
+- French "Parlez-moi de la colonne de feu": BM25 returned noise
+- Chinese/Korean/Russian: BM25=0 (correctly no matches)
+
+**Solution**: Detect query language using `langid` library and skip BM25 for non-English queries.
+
+**Library Choice**:
+| Library | Latency | Accuracy | Python 3.12 |
+|---------|---------|----------|-------------|
+| FastText | ~1ms | 176 langs | ✗ (numpy 2.0 issue) |
+| **langid** | ~0.15ms | 97 langs | ✓ |
+
+**Implementation**:
+- Added `detect_query_language()` in `rag_pipeline.py` using `langid.classify()`
+- Returns `"en"` for English (use BM25+Dense), `"non-en"` for others (Dense only)
+- Cold start: ~846ms (model load) - warmed at container startup
+- Per-query: ~0.15ms (negligible)
+
+**Test Results (15 multilingual queries)**:
+| Language | Queries | BM25 | Refusals |
+|----------|---------|------|----------|
+| Spanish | 3 | Skipped | 1 (off-topic) |
+| French | 3 | Skipped | 1 (off-topic) |
+| German | 2 | Skipped | 0 |
+| Portuguese | 2 | Skipped | 0 |
+| Chinese | 2 | Skipped | 0 |
+| Korean | 1 | Skipped | 0 |
+| Russian | 1 | Skipped | 0 |
+| English | 1 | Used | 0 |
+
+**Refusal verification**: French off-topic query ("Comment cuisiner des pâtes?" - How to cook pasta) correctly refused with `dense_top=0.4801 < 0.55`.
+
+**Files Modified**:
+- `src/branham_model_api/core/pipeline/rag_pipeline.py` - `detect_query_language()`, BM25 skip logic
+- `scripts/prefetch_hf_model.py` - `warm_langid()` for container startup
+- `scripts/test_rag_pipeline.py` - 15 multilingual test queries
+- `pyproject.toml` - Added `langid` dependency
+- `.cursor/rules/design_spec.md` - Section 3.6 Language Detection
+
+---
+
 ## Status Summary
 
 **Completed**: 
@@ -352,7 +398,9 @@ reranker:
   - `expansion.py` — ±1 expansion with sermon order preservation
   - `rag_pipeline.py` — Main orchestrator
 - Reranker integration (configurable, default disabled) ✓
-- Test harness with 20 queries ✓
+- **Language detection** (langid) — BM25 skip for non-English queries ✓
+- **Multilingual test harness** (15 queries: ES, FR, DE, PT, ZH, KO, RU, EN) ✓
+- Model prefetch + warmup script ✓
 
 **In Progress**:
 - LiteLLM generation integration
@@ -378,5 +426,113 @@ reranker:
 | Embedding   | `Qwen/Qwen3-Embedding-0.6B`  | vLLM          | Yes |
 | Reranker    | `Qwen/Qwen3-Reranker-0.6B`   | vLLM          | No (default: disabled) |
 | Generation  | External API (configurable)  | LiteLLM       | Yes |
+| Lang Detect | `langid` (bundled model)     | In-process    | Yes |
 
 See `.cursor/rules/design_spec.md` for full architecture details.
+
+---
+
+## 2026-02-11
+
+### Final Build Plan (Execution Checklist)
+
+This checklist is the working sequence for completing V1 API delivery.
+
+#### Phase A — Config + Contracts
+- [x] Add generator config keys in `config/default.yaml`:
+  - `models.llm_model: openrouter/deepseek/deepseek-chat`
+  - optional prompt/template overrides for system behavior
+- [x] Update config loader (`src/branham_model_api/config.py`) to expose generation settings.
+- [x] Implement env override: `LLM_MODEL` supersedes YAML value at runtime.
+- [x] Align API schemas for final modes (`answer|refusal|error`) and summary fields.
+- [x] Keep retrieval expansion as hyper-parameter (default lean context; DB tool for deep fetch).
+
+#### Phase B — Generation Module (LiteLLM + Key Rotation)
+- [x] Create `src/branham_model_api/generation/litellm_client.py`.
+- [x] Create `src/branham_model_api/generation/api_keys.py`:
+  - lookup keys `OPENROUTER_API_KEY_A` ... `OPENROUTER_API_KEY_E`
+  - equal-probability key selection
+  - retry once with a different key for rate-limit errors only
+- [x] Wire OpenRouter auth/header handling through LiteLLM.
+- [ ] Add health validation for generation availability (key/model configured).
+
+#### Phase C — Prompting + Context Assembly
+- [x] Create `src/branham_model_api/core/prompts/templates.py`.
+- [x] Build sermon-group context template:
+  - per-sermon metadata block (`sermon_title`, `date_id`)
+  - chunk lines with paragraph start/end and chunk ids
+  - resilient to `expansion.depth` on/off
+- [x] Enforce reference style in prompt:
+  - inline canonical references (no paragraph suffix letters)
+  - consolidated references block
+  - add final note pointing users to The Table app
+- [x] Retrieval input strategy:
+  - use `query + conversation_summary` for retrieval embedding
+  - include short chat history in LLM prompt context for dialogue continuity
+
+#### Phase D — Tooling (Looped, Stateless API)
+- [x] Implement tool registry and loop runner (server-internal only).
+- [x] Add DB Search tool (max 2 calls/request):
+  - single paragraph
+  - contiguous paragraph range
+  - batched ranges in same sermon
+  - batched ranges across multiple sermons
+  - return grouped per sermon for prompt injection
+- [x] Add Biography tool (max 1 call/request) backed by a local biography text file.
+- [x] Add Serper tool (max 2 calls/request), gated and labeled as unverified external data.
+- [x] Append tool outputs iteratively into model context until model returns final assistant answer.
+
+#### Phase E — API Route + Streaming
+- [x] Implement `/api/chat` full orchestrator:
+  - retrieval -> refusal gate -> generation/tool loop -> final response
+- [x] SSE for all responses (including refusal and early-stop paths).
+- [x] Emit final non-stream payload fields where needed (optional conversation summary, optional external info).
+- [x] Keep API stateless across requests.
+
+#### Phase F — Post-check + Policy Enforcement
+- [x] Implement `postcheck.py` for:
+  - reference presence and canonical format
+  - evidence alignment
+  - refusal fallback when checks fail
+- [x] Bible exception behavior:
+  - allow answer for Bible-focused queries even when retrieval confidence is weaker
+  - keep answer style grounded and clearly cited
+- [x] External-data policy:
+  - include `Unverified / External Information` section only when Serper tool is used
+
+#### Phase G — Tests + Developer Tooling
+- [x] Keep `scripts/test_rag_pipeline.py` retrieval-only.
+- [x] Create new full-flow test script (non-stream) for generation + tools.
+- [x] Add API integration test for SSE behavior (including refusal path).
+- [x] Validate multilingual behavior, references formatting, and tool-call limits.
+
+#### Phase H — Docs + Deployment Scope
+- [x] Update `README.md` and `PROJECT_STATUS.md` with finalized generation/tool flow.
+- [x] Ensure docs specify minimal V1 container contents only:
+  - required runtime code/config/data indices
+  - exclude training and non-runtime assets from container image
+- [x] Verify rule/doc consistency with `.cursor/rules/design_spec.md`.
+
+#### Phase I — Latency Bottleneck Elimination (Pre-Deployment)
+- [x] Run end-to-end latency profiling on local HTTP SSE path:
+  - TTFT (time to first `delta`)
+  - total time to `final`
+  - retrieval-only latency (cold/warm)
+- [x] Remove blocking latency before first streamed token in normal answer/refusal flow.
+  - **Streaming-first architecture:** every LLM call is now streamed; text tokens forwarded immediately.
+  - **Eliminated double LLM call:** old flow called LLM non-streaming (tool loop) then re-streamed.
+  - TTFT for LLM-powered answers: **10–18s** (down from 33–42s, ~60% improvement).
+- [x] Profile and reduce Python-side bottlenecks in retrieval and pre-generation orchestration.
+  - **Parallel BM25+Dense retrieval** via `ThreadPoolExecutor` (~8ms saved).
+  - **Configurable langid** (`retrieval.language_detection.mode: never`): saves ~800ms cold start.
+  - Retrieval warm path: 48–95ms, negligible.
+- [x] Define acceptance latency targets (local + Cloud Run) before rollout.
+  - Early retrieval refusal: < 100ms ✓
+  - LLM-powered answer/refusal: < 20s local ✓ (provider TTFT + tool iterations)
+  - Remaining bottleneck: tool-call iterations (~5–10s each) and provider first-token latency.
+- [x] Track fixes in `LATENCY_IMPROVEMENT_PLAN.md`.
+
+#### Final Step — Cloud Run Deployment
+- [ ] Deploy to Google Cloud Run (final rollout step).
+- [ ] Set Cloud Run `max instances` to `5` (cost-aware baseline; tune later).
+- [ ] Add detailed Cloud Run parameters (concurrency/min instances/timeouts) in follow-up deployment notes.

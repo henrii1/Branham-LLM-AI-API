@@ -61,6 +61,13 @@ from .rag_pipeline import (
     load_faiss_id_map,
     normalize_query,
 )
+from .postcheck import (
+    PostcheckResult,
+    finalize_answer,
+    has_bible_reference,
+    has_sermon_reference,
+    is_bible_query,
+)
 from .signals import (
     RetrievalSignals,
     compute_dense_score_std,
@@ -77,6 +84,12 @@ __all__ = [
     "create_rag_pipeline",
     "load_faiss_id_map",
     "normalize_query",
+    # Postcheck
+    "PostcheckResult",
+    "finalize_answer",
+    "is_bible_query",
+    "has_sermon_reference",
+    "has_bible_reference",
     # Protocols
     "EmbedderProtocol",
     "RerankerProtocol",

@@ -37,7 +37,10 @@ dependencies = [
     "uvicorn[standard]>=0.40.0",
     "wandb>=0.23.1",
     "huggingface_hub[cli]",
-    "numpy>=2.4.1"
+    "numpy>=2.4.1",
+    "lingua-language-detector>=2.1.1",
+    "langid>=1.1.6",
+    "litellm>=1.81.10",
 ]
 
 [project.optional-dependencies]

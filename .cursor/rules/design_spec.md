@@ -72,7 +72,7 @@ This API is the *only* AI endpoint called by the web app (Next.js + Supabase).
 7. A preset number of sermons (by date_id) are selected and their best chunks are packed into prompt context (token-budgeted).
 8. Text generation performed via a managed Model API layer (e.g., **LiteLLM**), not direct vendor calls, to enable easy model switching.
 9. **Tool calling** available during generation:
-   - **Sermon Lookup Tool**: Read exact quotes, paragraphs, or complete context from sermons
+   - **DB Search Tool (Sermon Lookup)**: Read exact quotes, paragraphs, or complete context from sermons
    - **Biography Tool**: Answer biographical questions about William Branham
    - **Serper (Web Search)**: External information (exception path, strict constraints)
 10. Final answer returned, grounded in RAG context with proper references.
@@ -124,7 +124,7 @@ This API is the *only* AI endpoint called by the web app (Next.js + Supabase).
 4. **Fusion + dedup**: Merge BM25 + dense using **Reciprocal Rank Fusion (RRF)**, deduplicate by chunk_id.
 5. **Collate by date_id**: Group chunks by sermon, rank by **composite score** (chunk_count + best_score), cap at 8.
 6. **Exact match fallback**: If query contains date_id or matches sermon title, add as 9th sermon if not in top 8.
-7. **Expand context**: Configurable ±N chunks (0 = disabled, 1 = ±1). Sermon Lookup Tool handles more.
+7. **Expand context**: Configurable ±N chunks (0 = disabled, 1 = ±1). DB Search Tool handles more.
 8. **Dedup after expansion**: Adjacent chunks may already be in retrieved set; remove duplicates.
 9. **Post-fusion refusal check**: If dense_top_score < threshold → return fixed refusal (semantic relevance).
 
@@ -168,6 +168,41 @@ reranker:
 uv run python scripts/prefetch_hf_model.py --all --skip-reranker --target-dir ./.hf-cache
 ```
 
+### 3.6 Language Detection & BM25 Skip
+
+**Problem**: BM25 is keyword-based and only works with English corpus. Non-English queries (French, Spanish, German, Chinese, etc.) return irrelevant BM25 hits that pollute fusion results.
+
+**Solution**: Detect query language and skip BM25 for non-English queries, relying solely on dense retrieval (which uses a multilingual embedder).
+
+**Library**: `langid` (pure Python, 97 languages, ~0.15ms per query after warmup)
+
+**Implementation** (`rag_pipeline.py`):
+```python
+def detect_query_language(query: str) -> str:
+    """Returns 'en' for English, 'non-en' for other languages."""
+    import langid
+    lang_code, score = langid.classify(query)
+    return "en" if lang_code == "en" else "non-en"
+```
+
+**Pipeline behavior**:
+| Query Language | BM25 | Dense | Refusal Check |
+|----------------|------|-------|---------------|
+| English | ✓ | ✓ | dense_top_score < 0.55 |
+| Non-English | ✗ (skipped) | ✓ | dense_top_score < 0.55 |
+
+**Latency**:
+- Cold start (model load): ~846ms (paid once at container startup)
+- Per-query: ~0.15ms (negligible)
+
+**Container startup**: langid is warmed via prefetch script:
+```bash
+uv run python scripts/prefetch_hf_model.py --all --target-dir ./.hf-cache
+# Includes: HF model download + langid warm
+```
+
+**Refusal works for all languages**: Refusal check uses `dense_top_score` (semantic similarity from multilingual embedder), not BM25. Off-topic queries in any language are correctly refused.
+
 ---
 
 ## 4) Text Generation (V1)
@@ -189,6 +224,14 @@ uv run python scripts/prefetch_hf_model.py --all --skip-reranker --target-dir ./
 - Store API key identifiers in a lookup table (integer → key-name).
 - Randomly select a key per request to distribute load and reduce throttling.
 - Must comply with provider terms and operational limits.
+- OpenRouter keys are expected as `OPENROUTER_API_KEY_A` ... `OPENROUTER_API_KEY_E`.
+- Selection policy: equal probability across available keys (no weighting).
+- Retry policy: if generation fails due to rate-limit class errors (e.g., 429), retry once with a different key, then return temporary-unavailable refusal/error.
+
+### 4.4 Generator model config
+- Generator model must be configured through YAML/env (no hardcoded model in code paths).
+- Default in `config/default.yaml`: `openrouter/deepseek/deepseek-chat`.
+- Env override: if `LLM_MODEL` is present, it overrides YAML at runtime.
 
 ---
 
@@ -198,13 +241,15 @@ The model has access to several tools for answering queries. This API serves as 
 
 ### 5.1 Available Tools
 
-#### 5.1.1 Sermon Lookup Tool
+#### 5.1.1 DB Search Tool (Sermon Lookup)
 **Purpose**: Search and retrieve exact quotes from sermons.
 
 **Capabilities**:
 - Search for exact quotes given a sermon (date_id) and paragraph number(s)
 - Read entire sermons by date_id
-- Read specific paragraphs within a sermon
+- Read single paragraph or contiguous paragraph ranges within a sermon
+- Batch multiple paragraph ranges in one call (same sermon)
+- Batch paragraph ranges across multiple sermons in one call, returned grouped by sermon
 - Complete context for the model when more surrounding text is needed
 
 **Use cases**:
@@ -214,10 +259,11 @@ The model has access to several tools for answering queries. This API serves as 
 - Reading consecutive paragraphs for narrative continuity
 
 **Parameters**:
-- `date_id` (required): Sermon identifier (e.g., `65-1128M`)
+- `mode`: `read_sermon` | `read_paragraphs` | `search_quote` | `batch_read`
+- `date_id` (optional in batch mode): Sermon identifier (e.g., `65-1128M`)
 - `paragraph_start` (optional): Starting paragraph number
 - `paragraph_end` (optional): Ending paragraph number
-- `mode`: `read_sermon` | `read_paragraphs` | `search_quote`
+- `requests` (optional, batch mode): array of `{date_id, paragraph_start, paragraph_end}`
 
 **Output**: Raw sermon text with paragraph markers, suitable for grounding answers.
 
@@ -263,17 +309,22 @@ The model has access to several tools for answering queries. This API serves as 
 When answering queries, tools should be considered in this order:
 
 1. **RAG retrieval** (default path) — always attempted first for sermon-related queries
-2. **Sermon Lookup Tool** — for exact quote requests or context completion
+2. **DB Search Tool (Sermon Lookup)** — for exact quote requests or context completion
 3. **Biography Tool** — for biographical questions about William Branham
 4. **Serper** — last resort for external/current information
 
 ### 5.3 Tool Call Limits
 
-| Tool           | Max Calls/Request | Notes                                    |
-|----------------|-------------------|------------------------------------------|
-| Sermon Lookup  | 5                 | Can chain reads for context expansion    |
-| Biography      | 1                 | Single call returns complete bio section |
-| Serper         | 2                 | Exception path only                      |
+| Tool                 | Max Calls/Request | Notes                                                              |
+|----------------------|-------------------|--------------------------------------------------------------------|
+| DB Search (Sermon)   | 3                 | Use batch mode to fetch multiple ranges/sermons in one call        |
+| Biography            | 2                 | Single call usually enough; hard limit remains 2                   |
+| Serper               | 2                 | Exception path only                                                |
+
+Additional limit policy:
+- System prompt hard limit target: **3 total tool calls**.
+- Code guardrail is lenient at **4 total tool calls** for edge cases.
+- On tool limit, return structured tool output instructing model to continue with available evidence.
 
 ---
 
@@ -283,6 +334,7 @@ When answering queries, tools should be considered in this order:
 - Always grounded in sermon corpus RAG context.
 - Includes inline references where appropriate (e.g., `[47-0412M: ¶2–¶3]`).
 - Ends with a consolidated **References** block.
+- End with a short reader note directing users to The Table app for sermon lookup: [The Table](https://table.branham.org/).
 
 ### 6.2 External information (if any)
 - Explicitly separated from RAG-grounded content.
@@ -291,9 +343,14 @@ When answering queries, tools should be considered in this order:
 - **No mixing** of corpus-grounded assertions with web-derived assertions.
 
 ### 6.3 Refusal behavior
-Two refusal paths:
-1. **Post-fusion refusal**: After retrieval + fusion, if best fused score < threshold OR no valid chunks → return fixed refusal (no LLM call). This saves LLM cost when evidence is genuinely missing.
-2. **Post-LLM refusal**: Model output fails evidence alignment / references / formatting checks.
+Primary refusal path:
+1. **Post-fusion refusal**: After retrieval + fusion, return fixed refusal when retrieval is clearly weak.
+   - English path: refuse only when **both** dense and BM25 top scores are below thresholds.
+   - Non-English path (BM25 skipped): dense threshold only.
+   - Also refuse when no fused hits exist.
+
+Post-LLM behavior:
+2. **Post-LLM normalization only**: server postcheck normalizes output (external section handling), but does not convert to refusal.
 
 ---
 
@@ -306,8 +363,10 @@ System prompt must guide the model to:
 - Always include references:
   - inline references when appropriate (e.g., `[47-0412M: ¶2–¶3]`)
   - plus a consolidated references list at end
+- Never include paragraph split suffixes (e.g., `12a`, `12b`) in user-facing references; references must use canonical numeric paragraphs only.
+- When external web data is used, place it under a dedicated `Unverified / External Information` section with markdown source links.
 
-**Important**: Server-side post-check must enforce the contract; do not rely on prompt alone.
+**Important**: Prompt contract remains strict. Server-side postcheck currently normalizes output only (no refusal gating).
 
 ---
 
@@ -333,7 +392,7 @@ config = RetrievalConfig.from_yaml()  # Loads from config/default.yaml
 - `retrieval.dense` — Dense embedding parameters
 - `retrieval.reranker` — Reranker mode (never/conditional/always)
 - `retrieval.collation` — max_sermons
-- `retrieval.refusal` — min_dense_score threshold
+- `retrieval.refusal` — `min_dense_score` and `min_bm25_score` thresholds
 - `indices` — Index file paths
 
 ---
@@ -403,8 +462,10 @@ Goal: narrative-friendly but retrieval-stable chunking.
 ### 10.2 Bounded neighborhood expansion (LOCKED)
 We reconstruct story continuity without storing separate "parent chunks".
 
-- Expansion depth: **Always ±1 chunk** (fixed, not variable).
-- The **Sermon Lookup Tool** (Section 5.1.1) handles additional context needs on-demand during generation, allowing the model to fetch more paragraphs when required.
+- Expansion depth is a **hyper-parameter** (configurable).
+- Recommended default for tool-enabled flow: `0` (disabled), so initial prompt stays lean and DB Search Tool handles precise context fetches on-demand.
+- Optional setting: `1` for ±1 chunk expansion when needed by latency/quality tradeoffs.
+- The **DB Search Tool** (Section 5.1.1) handles additional context needs during generation, allowing the model to fetch more paragraphs when required.
 
 Expansion constraints:
 - Must respect strict token budget caps.
@@ -437,28 +498,30 @@ Expansion constraints:
     - Rank sermons by their **best chunk score**
     - **Cap at 8 sermons**
 10. Select top-K chunks from the 8 selected sermons.
-11. **Expand context** (always ±1 chunk):
+11. **Expand context** (configurable; default 0):
     - Fetch adjacent chunks for each retrieved chunk
     - Stay within same sermon (date_id)
 12. **Dedup after expansion**:
     - Adjacent chunks may already be in retrieved set
     - Remove duplicates before prompt building
 13. **Post-fusion refusal check**:
-    - If best fused score < threshold OR no valid chunks → return fixed refusal (no LLM call)
+    - If no valid fused chunks → return fixed refusal (no LLM call)
+    - English: refuse only if dense and BM25 top scores are both below thresholds
+    - Non-English: refuse if dense top score is below threshold
 14. Build prompt with:
     - system prompt rules
+    - retrieval query built from `query` + `conversation_summary` (preferred over long raw history)
+    - optional short recent history window for dialogue continuity (LLM context only)
     - retrieved context (deduplicated, expanded)
     - user language
-    - tool definitions (Sermon Lookup, Biography, Serper)
+    - tool definitions (DB Search, Biography, Serper)
     - formatting requirements (inline refs + refs block)
 15. **Generate response** via LiteLLM → external API (multilingual model).
-    - Model may invoke tools (e.g., Sermon Lookup for more context)
-16. Post-check enforcement:
-    - references present
-    - references valid (date_id exists; chunk_ids exist; paragraph range present)
-    - output format compliance
-    - evidence alignment (if required checks fail → refusal)
-17. Return answer + references payload.
+    - Model may invoke tools (e.g., DB Search for more context)
+16. Post-check normalization:
+    - append/remove `Unverified / External Information` section based on tool usage
+    - keep final output mode as answer when text is present (no postcheck refusal conversion)
+17. Return streamed answer payload (SSE final event includes mode, answer, and optional metadata fields).
 
 ---
 
@@ -468,6 +531,8 @@ Expansion constraints:
 - **No model weights are baked into container images.**
 - Models are fetched and loaded at container startup; containers remain lightweight and stateless.
 - vLLM loads standard HF artifacts (tokenizer/config + weights, commonly **safetensors**).
+- V1 container images must include only runtime-critical assets (API code, config, indices, chunk store, prompt files, minimal tool data).
+- Exclude non-runtime directories from image contents (training, large dataset pipelines, local test assets, notebooks, and other dev-only artifacts).
 
 ### 12.2 Artifact policy
 - **Production**: Keep only the minimal HF snapshot artifacts required to boot reliably (mounted cache volume) + any vLLM runtime cache artifacts created at startup.
@@ -567,22 +632,23 @@ use_vllm = (branch == "main" and device.type == "cuda")
 
 ### 15.1 POST /chat
 Request fields:
-- `session_id` (string)
+- `conversation_id` (string)
 - `query` (string)
-- `history_window` (recent turns)
+- `history_window` (recent turns, optional)
+- `conversation_summary` (optional summary string; preferred retrieval context over raw long history)
 
 
 Response fields:
 - `answer` (string)
-- `mode` (`tool call` | `valid response` | `refusal`)
-- `references` (array):
-  - `date_id`
-  - `paragraph_start`
-  - `paragraph_end`
-  - `chunk_ids` (array)
+- `mode` (`answer` | `refusal` | `error`)
 - `external_info` (optional object, present only when Serper was used):
   - `disclaimer` (string)
   - `sources` (array of URLs)
+- `conversation_summary` (optional; non-stream payload sent at end to help frontend maintain short memory for retrieval)
+
+**Streaming contract**:
+- API must stream **all** responses via SSE, including early refusal/off-topic responses.
+- Tool-call internals remain server-side; client receives progressive answer/refusal events and final metadata.
 
 ### 15.2 GET /health
 - readiness check: indices available + vLLM services healthy + LiteLLM configured
@@ -595,6 +661,8 @@ Response fields:
   - Example: `... (see [47-0412M: ¶2–¶3])`
 - References block at end (consolidated):
   - Each item includes date_id + paragraph range + optionally title.
+- Paragraph references must be numeric only (no suffix letters like `a/b/c` even if internal chunking split was applied).
+- Final answer should include a short user note to find sermons in [The Table](https://table.branham.org/).
 
 ---
 
@@ -736,7 +804,7 @@ model-api/
 | 11) Prompt build (system rules + context + tools + user language)    |
 |                                                                      |
 | 12) Generate response (LiteLLM → External API)                       |
-|     - Tools available: Sermon Lookup, Biography, Serper (gated)      |
+|     - Tools available: DB Search, Biography, Serper (gated)          |
 |                                                                      |
 | 13) Post-check enforcement                                           |
 |     - references present + valid (date_id + paragraph range)         |

@@ -6,6 +6,7 @@ Loads settings from config/default.yaml and provides typed access.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -73,13 +74,48 @@ class RetrievalSettings:
     expansion_delta: int = 0
     
     # Refusal
-    min_dense_score: float = 0.55
+    min_dense_score: float = 0.20
+    min_bm25_score: float = 0.20
+    
+    # Language detection: "never" or "auto"
+    language_detection_mode: str = "never"
+
+
+@dataclass
+class LLMProviderSettings:
+    """Active LLM provider configuration resolved from YAML."""
+    provider: str = "deepseek"
+    model: str = "deepseek/deepseek-chat"
+    base_url: str | None = None
+    key_prefix: str = "DEEPSEEK_API_KEY"
+    temperature: float = 0.2
+    timeout: float = 30.0
+
+    @property
+    def effective_model(self) -> str:
+        """Env var LLM_MODEL overrides YAML model."""
+        return os.getenv("LLM_MODEL", self.model)
+
+
+@dataclass
+class ModelSettings:
+    """Model settings for retrieval/generation."""
+    embedding_model_id: str = "Qwen/Qwen3-Embedding-0.6B"
+    reranker_model_id: str = "Qwen/Qwen3-Reranker-0.6B"
+    tokenizer_model_id: str | None = None
+    llm: LLMProviderSettings = field(default_factory=LLMProviderSettings)
+
+    @property
+    def effective_llm_model(self) -> str:
+        """Backwards-compatible accessor."""
+        return self.llm.effective_model
 
 
 @dataclass
 class AppConfig:
     """Full application configuration."""
     retrieval: RetrievalSettings = field(default_factory=RetrievalSettings)
+    models: ModelSettings = field(default_factory=ModelSettings)
     
     # Index paths
     bm25_path: str = "./data/indices/bm25.index"
@@ -109,7 +145,39 @@ class AppConfig:
             reranker=reranker,
             max_sermons=ret.get("collation", {}).get("max_sermons", 8),
             expansion_delta=ret.get("expansion", {}).get("depth", 0),
-            min_dense_score=ret.get("refusal", {}).get("min_dense_score", 0.55),
+            min_dense_score=float(ret.get("refusal", {}).get("min_dense_score", 0.20)),
+            min_bm25_score=float(ret.get("refusal", {}).get("min_bm25_score", 0.20)),
+            language_detection_mode=ret.get("language_detection", {}).get("mode", "never"),
+        )
+
+        models_raw = raw.get("models", {})
+
+        # Parse LLM provider config
+        llm_raw = raw.get("llm", {})
+        active_provider = llm_raw.get("provider", "deepseek")
+        providers_raw = llm_raw.get("providers", {})
+        provider_cfg = providers_raw.get(active_provider, {})
+
+        llm_settings = LLMProviderSettings(
+            provider=active_provider,
+            model=provider_cfg.get("model", "deepseek/deepseek-chat"),
+            base_url=provider_cfg.get("base_url"),
+            key_prefix=provider_cfg.get("key_prefix", "DEEPSEEK_API_KEY"),
+            temperature=float(llm_raw.get("temperature", 0.2)),
+            timeout=float(llm_raw.get("timeout", 30.0)),
+        )
+
+        models = ModelSettings(
+            embedding_model_id=models_raw.get(
+                "embedding_model_id",
+                "Qwen/Qwen3-Embedding-0.6B",
+            ),
+            reranker_model_id=models_raw.get(
+                "reranker_model_id",
+                "Qwen/Qwen3-Reranker-0.6B",
+            ),
+            tokenizer_model_id=models_raw.get("tokenizer_model_id"),
+            llm=llm_settings,
         )
         
         # Parse index paths
@@ -117,6 +185,7 @@ class AppConfig:
         
         return cls(
             retrieval=retrieval,
+            models=models,
             bm25_path=indices.get("bm25_path", "./data/indices/bm25.index"),
             faiss_path=indices.get("faiss_path", "./data/indices/faiss.index"),
             chunk_store_path=indices.get("chunk_store_path", "./data/processed/chunks.sqlite"),

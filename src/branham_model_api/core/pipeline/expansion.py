@@ -30,6 +30,8 @@ class ExpandedChunk:
     paragraph_start: int
     paragraph_end: int
     word_count: int
+    char_count: int
+    is_tail_chunk: bool
     score: float | None  # Original retrieval score (None for expanded neighbors)
     is_retrieved: bool  # True if originally retrieved, False if expansion neighbor
 
@@ -42,6 +44,8 @@ class ExpandedSermon:
     title: str | None  # Sermon title (for display/reference)
     source: str | None  # Source (e.g., PDF filename)
     language: str  # Language code (default "en")
+    min_paragraph_no: int | None  # Canonical sermon min paragraph number
+    max_paragraph_no: int | None  # Canonical sermon max paragraph number
     best_score: float  # Best score among originally retrieved chunks
     chunks: list[ExpandedChunk]  # Ordered by chunk_index
 
@@ -94,6 +98,8 @@ def expand_chunks(
                     paragraph_start=adj.paragraph_start,
                     paragraph_end=adj.paragraph_end,
                     word_count=adj.word_count,
+                    char_count=adj.char_count,
+                    is_tail_chunk=adj.is_tail_chunk,
                     score=chunk_scores.get(adj.chunk_id),
                     is_retrieved=is_retrieved,
                 )
@@ -133,6 +139,7 @@ def group_expanded_by_sermon(
     # Fetch sermon metadata for all date_ids
     date_ids = list(sermons.keys())
     sermon_metadata = chunk_store.get_sermons(date_ids)
+    paragraph_bounds = chunk_store.get_paragraph_bounds_many(date_ids)
 
     # Create ExpandedSermon objects
     result = []
@@ -149,12 +156,17 @@ def group_expanded_by_sermon(
         title = meta.title if meta else None
         source = meta.source if meta else None
         language = meta.language if meta else "en"
+        bounds = paragraph_bounds.get(date_id)
+        min_paragraph_no = bounds[0] if bounds else None
+        max_paragraph_no = bounds[1] if bounds else None
 
         result.append(ExpandedSermon(
             date_id=date_id,
             title=title,
             source=source,
             language=language,
+            min_paragraph_no=min_paragraph_no,
+            max_paragraph_no=max_paragraph_no,
             best_score=best_score,
             chunks=chunks,
         ))

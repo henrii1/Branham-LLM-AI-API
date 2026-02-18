@@ -8,7 +8,7 @@ Provides efficient lookup of chunks by:
 - Adjacent chunks for expansion (±N)
 
 Tables used (from DATA_FORMAT.md):
-- chunks: chunk_id, date_id, paragraph_start, paragraph_end, chunk_index, text, word_count, char_count
+- chunks: chunk_id, date_id, paragraph_start, paragraph_end, chunk_index, text, word_count, char_count, is_tail_chunk
 - sermons: date_id, title, source, language
 """
 
@@ -32,6 +32,7 @@ class ChunkRecord:
     text: str
     word_count: int
     char_count: int
+    is_tail_chunk: bool
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,16 @@ class SermonRecord:
     title: str | None
     source: str | None
     language: str
+
+
+@dataclass(frozen=True)
+class ParagraphRecord:
+    """A raw paragraph record from the canonical paragraphs table."""
+
+    date_id: str
+    paragraph_no: int
+    sub_id: str
+    text: str
 
 
 class ChunkStore:
@@ -66,6 +77,35 @@ class ChunkStore:
         self._conn.execute("PRAGMA journal_mode = WAL;")
         self._conn.execute("PRAGMA synchronous = NORMAL;")
         self._conn.execute("PRAGMA cache_size = -64000;")  # 64MB cache
+        self._has_is_tail_chunk = self._detect_column("chunks", "is_tail_chunk")
+
+    def _detect_column(self, table: str, column: str) -> bool:
+        cur = self._conn.execute(f"PRAGMA table_info({table})")
+        return any(row["name"] == column for row in cur.fetchall())
+
+    def _chunk_tail_sql(self, *, table_alias: str = "") -> str:
+        prefix = f"{table_alias}." if table_alias else ""
+        if self._has_is_tail_chunk:
+            return f"COALESCE({prefix}is_tail_chunk, 0) AS is_tail_chunk"
+        # Fallback inference when migration has not been applied yet.
+        return (
+            "CASE WHEN "
+            f"{prefix}chunk_index = (SELECT MAX(c2.chunk_index) FROM chunks c2 WHERE c2.date_id = {prefix}date_id) "
+            "THEN 1 ELSE 0 END AS is_tail_chunk"
+        )
+
+    def _chunk_record_from_row(self, row: sqlite3.Row) -> ChunkRecord:
+        return ChunkRecord(
+            chunk_id=row["chunk_id"],
+            date_id=row["date_id"],
+            paragraph_start=row["paragraph_start"],
+            paragraph_end=row["paragraph_end"],
+            chunk_index=row["chunk_index"],
+            text=row["text"],
+            word_count=row["word_count"],
+            char_count=row["char_count"],
+            is_tail_chunk=bool(row["is_tail_chunk"]),
+        )
 
     def close(self) -> None:
         """Close the database connection."""
@@ -80,9 +120,10 @@ class ChunkStore:
     def get_chunk(self, chunk_id: str) -> ChunkRecord | None:
         """Get a single chunk by ID."""
         cur = self._conn.execute(
-            """
+            f"""
             SELECT chunk_id, date_id, paragraph_start, paragraph_end,
-                   chunk_index, text, word_count, char_count
+                   chunk_index, text, word_count, char_count,
+                   {self._chunk_tail_sql()}
             FROM chunks
             WHERE chunk_id = ?
             """,
@@ -91,16 +132,7 @@ class ChunkStore:
         row = cur.fetchone()
         if row is None:
             return None
-        return ChunkRecord(
-            chunk_id=row["chunk_id"],
-            date_id=row["date_id"],
-            paragraph_start=row["paragraph_start"],
-            paragraph_end=row["paragraph_end"],
-            chunk_index=row["chunk_index"],
-            text=row["text"],
-            word_count=row["word_count"],
-            char_count=row["char_count"],
-        )
+        return self._chunk_record_from_row(row)
 
     def get_chunks(self, chunk_ids: Sequence[str]) -> dict[str, ChunkRecord]:
         """
@@ -116,7 +148,8 @@ class ChunkStore:
         cur = self._conn.execute(
             f"""
             SELECT chunk_id, date_id, paragraph_start, paragraph_end,
-                   chunk_index, text, word_count, char_count
+                   chunk_index, text, word_count, char_count,
+                   {self._chunk_tail_sql()}
             FROM chunks
             WHERE chunk_id IN ({placeholders})
             """,
@@ -125,43 +158,243 @@ class ChunkStore:
 
         result: dict[str, ChunkRecord] = {}
         for row in cur.fetchall():
-            result[row["chunk_id"]] = ChunkRecord(
-                chunk_id=row["chunk_id"],
-                date_id=row["date_id"],
-                paragraph_start=row["paragraph_start"],
-                paragraph_end=row["paragraph_end"],
-                chunk_index=row["chunk_index"],
-                text=row["text"],
-                word_count=row["word_count"],
-                char_count=row["char_count"],
-            )
+            result[row["chunk_id"]] = self._chunk_record_from_row(row)
         return result
 
     def get_chunks_by_sermon(self, date_id: str) -> list[ChunkRecord]:
         """Get all chunks from a sermon, ordered by chunk_index."""
         cur = self._conn.execute(
-            """
+            f"""
             SELECT chunk_id, date_id, paragraph_start, paragraph_end,
-                   chunk_index, text, word_count, char_count
+                   chunk_index, text, word_count, char_count,
+                   {self._chunk_tail_sql()}
             FROM chunks
             WHERE date_id = ?
             ORDER BY chunk_index ASC
             """,
             (date_id,),
         )
+        return [self._chunk_record_from_row(row) for row in cur.fetchall()]
+
+    def get_chunks_by_paragraph_range(
+        self,
+        date_id: str,
+        paragraph_start: int,
+        paragraph_end: int,
+    ) -> list[ChunkRecord]:
+        """
+        Get chunks overlapping a paragraph range within one sermon.
+
+        Overlap condition:
+          chunk.paragraph_end >= paragraph_start
+          chunk.paragraph_start <= paragraph_end
+        """
+        start = min(paragraph_start, paragraph_end)
+        end = max(paragraph_start, paragraph_end)
+        cur = self._conn.execute(
+            f"""
+            SELECT chunk_id, date_id, paragraph_start, paragraph_end,
+                   chunk_index, text, word_count, char_count,
+                   {self._chunk_tail_sql()}
+            FROM chunks
+            WHERE date_id = ?
+              AND paragraph_end >= ?
+              AND paragraph_start <= ?
+            ORDER BY chunk_index ASC
+            """,
+            (date_id, start, end),
+        )
+        return [self._chunk_record_from_row(row) for row in cur.fetchall()]
+
+    def get_paragraphs_by_sermon(self, date_id: str) -> list[ParagraphRecord]:
+        """Get all canonical paragraphs for a sermon ordered by paragraph_no + sub_id."""
+        cur = self._conn.execute(
+            """
+            SELECT date_id, paragraph_no, sub_id, text
+            FROM paragraphs
+            WHERE date_id = ?
+            ORDER BY
+              paragraph_no ASC,
+              CASE WHEN sub_id = '' THEN 0 ELSE 1 END ASC,
+              sub_id ASC
+            """,
+            (date_id,),
+        )
         return [
-            ChunkRecord(
-                chunk_id=row["chunk_id"],
+            ParagraphRecord(
                 date_id=row["date_id"],
-                paragraph_start=row["paragraph_start"],
-                paragraph_end=row["paragraph_end"],
-                chunk_index=row["chunk_index"],
-                text=row["text"],
-                word_count=row["word_count"],
-                char_count=row["char_count"],
+                paragraph_no=int(row["paragraph_no"]),
+                sub_id=row["sub_id"] or "",
+                text=row["text"] or "",
             )
             for row in cur.fetchall()
         ]
+
+    def get_paragraphs_by_range(
+        self,
+        date_id: str,
+        paragraph_start: int,
+        paragraph_end: int,
+    ) -> list[ParagraphRecord]:
+        """Get canonical paragraphs overlapping a paragraph number range."""
+        start = min(paragraph_start, paragraph_end)
+        end = max(paragraph_start, paragraph_end)
+        cur = self._conn.execute(
+            """
+            SELECT date_id, paragraph_no, sub_id, text
+            FROM paragraphs
+            WHERE date_id = ?
+              AND paragraph_no >= ?
+              AND paragraph_no <= ?
+            ORDER BY
+              paragraph_no ASC,
+              CASE WHEN sub_id = '' THEN 0 ELSE 1 END ASC,
+              sub_id ASC
+            """,
+            (date_id, start, end),
+        )
+        return [
+            ParagraphRecord(
+                date_id=row["date_id"],
+                paragraph_no=int(row["paragraph_no"]),
+                sub_id=row["sub_id"] or "",
+                text=row["text"] or "",
+            )
+            for row in cur.fetchall()
+        ]
+
+    def search_paragraphs_by_text(
+        self,
+        query: str,
+        *,
+        date_id: str | None = None,
+        limit: int = 40,
+    ) -> list[ParagraphRecord]:
+        """
+        Search canonical paragraphs by substring.
+
+        Returns raw paragraph rows (including sub_id parts) so callers can merge
+        split paragraph parts (e.g., 12a/12b) back to canonical paragraph 12.
+        """
+        q = f"%{query}%"
+        if date_id:
+            cur = self._conn.execute(
+                """
+                SELECT date_id, paragraph_no, sub_id, text
+                FROM paragraphs
+                WHERE date_id = ? AND text LIKE ?
+                ORDER BY
+                  paragraph_no ASC,
+                  CASE WHEN sub_id = '' THEN 0 ELSE 1 END ASC,
+                  sub_id ASC
+                LIMIT ?
+                """,
+                (date_id, q, limit),
+            )
+        else:
+            cur = self._conn.execute(
+                """
+                SELECT date_id, paragraph_no, sub_id, text
+                FROM paragraphs
+                WHERE text LIKE ?
+                ORDER BY
+                  date_id ASC,
+                  paragraph_no ASC,
+                  CASE WHEN sub_id = '' THEN 0 ELSE 1 END ASC,
+                  sub_id ASC
+                LIMIT ?
+                """,
+                (q, limit),
+            )
+        return [
+            ParagraphRecord(
+                date_id=row["date_id"],
+                paragraph_no=int(row["paragraph_no"]),
+                sub_id=row["sub_id"] or "",
+                text=row["text"] or "",
+            )
+            for row in cur.fetchall()
+        ]
+
+    def get_paragraph_bounds(self, date_id: str) -> tuple[int, int] | None:
+        """Return (min_paragraph_no, max_paragraph_no) for a sermon."""
+        cur = self._conn.execute(
+            """
+            SELECT MIN(paragraph_no) AS min_no, MAX(paragraph_no) AS max_no
+            FROM paragraphs
+            WHERE date_id = ?
+            """,
+            (date_id,),
+        )
+        row = cur.fetchone()
+        if row is None or row["min_no"] is None or row["max_no"] is None:
+            return None
+        return int(row["min_no"]), int(row["max_no"])
+
+    def get_paragraph_bounds_many(
+        self,
+        date_ids: Sequence[str],
+    ) -> dict[str, tuple[int, int]]:
+        """Batch paragraph bounds lookup keyed by date_id."""
+        if not date_ids:
+            return {}
+        placeholders = ",".join("?" for _ in date_ids)
+        cur = self._conn.execute(
+            f"""
+            SELECT date_id, MIN(paragraph_no) AS min_no, MAX(paragraph_no) AS max_no
+            FROM paragraphs
+            WHERE date_id IN ({placeholders})
+            GROUP BY date_id
+            """,
+            tuple(date_ids),
+        )
+        out: dict[str, tuple[int, int]] = {}
+        for row in cur.fetchall():
+            if row["min_no"] is None or row["max_no"] is None:
+                continue
+            out[row["date_id"]] = (int(row["min_no"]), int(row["max_no"]))
+        return out
+
+    def search_chunks_by_text(
+        self,
+        query: str,
+        *,
+        date_id: str | None = None,
+        limit: int = 20,
+    ) -> list[ChunkRecord]:
+        """
+        Search chunks by a text substring.
+
+        This is a lightweight LIKE-based helper for tool lookup.
+        """
+        q = f"%{query}%"
+        if date_id:
+            cur = self._conn.execute(
+                f"""
+                SELECT chunk_id, date_id, paragraph_start, paragraph_end,
+                       chunk_index, text, word_count, char_count,
+                       {self._chunk_tail_sql()}
+                FROM chunks
+                WHERE date_id = ? AND text LIKE ?
+                ORDER BY chunk_index ASC
+                LIMIT ?
+                """,
+                (date_id, q, limit),
+            )
+        else:
+            cur = self._conn.execute(
+                f"""
+                SELECT chunk_id, date_id, paragraph_start, paragraph_end,
+                       chunk_index, text, word_count, char_count,
+                       {self._chunk_tail_sql()}
+                FROM chunks
+                WHERE text LIKE ?
+                ORDER BY date_id ASC, chunk_index ASC
+                LIMIT ?
+                """,
+                (q, limit),
+            )
+        return [self._chunk_record_from_row(row) for row in cur.fetchall()]
 
     def get_adjacent_chunks(
         self,
@@ -186,28 +419,17 @@ class ChunkStore:
         max_idx = chunk_index + delta
 
         cur = self._conn.execute(
-            """
+            f"""
             SELECT chunk_id, date_id, paragraph_start, paragraph_end,
-                   chunk_index, text, word_count, char_count
+                   chunk_index, text, word_count, char_count,
+                   {self._chunk_tail_sql()}
             FROM chunks
             WHERE date_id = ? AND chunk_index >= ? AND chunk_index <= ?
             ORDER BY chunk_index ASC
             """,
             (date_id, min_idx, max_idx),
         )
-        return [
-            ChunkRecord(
-                chunk_id=row["chunk_id"],
-                date_id=row["date_id"],
-                paragraph_start=row["paragraph_start"],
-                paragraph_end=row["paragraph_end"],
-                chunk_index=row["chunk_index"],
-                text=row["text"],
-                word_count=row["word_count"],
-                char_count=row["char_count"],
-            )
-            for row in cur.fetchall()
-        ]
+        return [self._chunk_record_from_row(row) for row in cur.fetchall()]
 
     def get_sermon(self, date_id: str) -> SermonRecord | None:
         """Get sermon metadata by date_id."""

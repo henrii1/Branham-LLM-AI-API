@@ -61,6 +61,28 @@ See `.cursor/rules/design_spec.md` for the complete V1 architecture and reposito
 | Embedding   | `Qwen/Qwen3-Embedding-0.6B`  | vLLM          | Yes |
 | Reranker    | `Qwen/Qwen3-Reranker-0.6B`   | vLLM          | No (disabled by default) |
 | Generation  | External API (configurable)  | LiteLLM       | Yes |
+| Lang Detect | `langid` (bundled)           | In-process    | Yes |
+
+**Multilingual Support:** Queries in any language are supported. The embedding model is multilingual (Qwen3). For non-English queries, BM25 is automatically skipped (keyword search doesn't work cross-language) and dense retrieval is used exclusively.
+
+### Implemented Flow Status
+
+- `/api/chat` streams via SSE for all outcomes (`answer`, `refusal`, `error`).
+- Early retrieval refusal is streamed (no non-stream bypass).
+- Internal tool loop is implemented with per-request limits:
+  - `db_search`: 3 (hard), system prompt targets <=1 batched
+  - `biography_search`: 2 (hard), system prompt targets 1
+  - `internet_search`: 2 (hard), system prompt targets 1
+  - Total per request: 3 (hard), system prompt targets <=2
+- Post-check enforcement is active:
+  - canonical sermon citation requirement for non-Bible answers
+  - Bible-query exception path
+  - external section enforcement only when web tool is used
+
+### Request Contract
+
+Canonical input uses `conversation_id` (backend accepts `session_id` as legacy alias).
+See `API_INPUT_FORMAT.md` for full request payload contract and ordering rules.
 
 ### Configuration
 
@@ -75,6 +97,50 @@ retrieval:
   refusal:
     min_dense_score: 0.55
 ```
+
+### Production Deployment
+
+For container startup, prefetch models AND warm them to eliminate first-request latency:
+
+```bash
+# Download models + warm (load into memory)
+uv run python scripts/prefetch_hf_model.py --all --warm --skip-reranker --target-dir ./.hf-cache
+
+# Warm only (if models already downloaded)
+uv run python scripts/prefetch_hf_model.py --warm-only --skip-reranker --target-dir ./.hf-cache
+```
+
+Warmup loads:
+- **Embedding model**: ~3-5 seconds (eliminates first-query latency)
+- **langid**: ~850ms (language detection)
+
+### Container Image Scope (V1)
+
+Production image should include only runtime-critical assets:
+- `src/branham_model_api/`
+- `config/`
+- `data/indices/` (`bm25.index`, `faiss.index`, `faiss_id_map.jsonl`, `faiss_meta.json`)
+- `data/processed/chunks.sqlite`
+- `data/reference/biography.txt`
+
+Do not include non-runtime assets in container image:
+- `training/`
+- `datasets/ingest/` pipelines and large local processing artifacts
+- local debug logs, notebooks, and dev-only files
+
+### Manual Full-Flow Debug (Non-Stream)
+
+Use:
+```bash
+KMP_DUPLICATE_LIB_OK=TRUE uv run python "scripts/test_chat_full_flow.py"
+```
+
+Artifacts are overwritten per run and written to:
+- `data/logs/chat_flow/latest_run.json`
+- `data/logs/chat_flow/latest_answer.md`
+- `data/logs/chat_flow/latest_rag_context.txt`
+- `data/logs/chat_flow/latest_llm_messages.json`
+- `data/logs/chat_flow/latest_llm_traces.json`
 
 ### Dependencies
 

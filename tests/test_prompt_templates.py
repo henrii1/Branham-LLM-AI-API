@@ -81,6 +81,15 @@ def test_build_system_prompt_includes_enforced_reference_policies() -> None:
     assert "The Table" in prompt
 
 
+def test_build_system_prompt_appends_runtime_addendum() -> None:
+    prompt = build_system_prompt(
+        refusal_message="I can only answer questions based on William Branham's sermons. I don't have enough relevant information to answer your question.",
+        extra_instructions="BIBLE-QUERY MODE:\n- This query is in scope.",
+    )
+    assert "MODE-SPECIFIC ADDENDUM (RUNTIME)" in prompt
+    assert "BIBLE-QUERY MODE" in prompt
+
+
 def test_build_chat_messages_includes_query_history_and_context() -> None:
     rag_context = build_rag_context([_sample_sermon()])
     messages = build_chat_messages(

@@ -536,3 +536,15 @@ This checklist is the working sequence for completing V1 API delivery.
 - [ ] Deploy to Google Cloud Run (final rollout step).
 - [ ] Set Cloud Run `max instances` to `5` (cost-aware baseline; tune later).
 - [ ] Add detailed Cloud Run parameters (concurrency/min instances/timeouts) in follow-up deployment notes.
+
+---
+
+## 2026-02-19
+
+### English-only language gate (current product decision)
+- ✅ Non-English queries are declined in the user’s language and streamed via SSE (no retrieval, no tools).
+- ✅ Deterministic detection:
+  - `user_language` hint (if provided) is authoritative.
+  - Otherwise, non-ASCII alphabetic characters trigger non-English handling.
+  - ASCII-only non-English queries require the frontend to provide `user_language`.
+- ✅ `scripts/test_chat_full_flow.py` matches the API gate behavior for non-stream debugging.

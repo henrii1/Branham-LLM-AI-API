@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import argparse
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -22,7 +23,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from branham_model_api.api.routes.chat import (  # noqa: E402
     SERVICE_UNAVAILABLE_MESSAGE,
+    _ENGLISH_ONLY_MESSAGE,
     _get_fixed_refusal_message,
+    _is_english_request,
+    _maybe_override_refusal_for_allowed_query,
+    _normalize_english_only_reply,
     get_chat_runtime,
 )
 from branham_model_api.core.pipeline import finalize_answer, is_bible_query  # noqa: E402
@@ -38,12 +43,14 @@ from branham_model_api.generation import (  # noqa: E402
 )
 
 # ---- Editable defaults for quick local manual checks ----
-DEFAULT_QUERY = "what does william branham preach about faith, compared with joseph prince recent sermons and branham's recent followers belief, check the internet.?"
-DEFAULT_HISTORY_WINDOW = [
+DEFAULT_QUERY = """I want to """
+DEFAULT_HISTORY_WINDOW = []
+
+"""[
     {"role": "user", "content": "I want to ask a question?"},
     {"role": "assistant", "content": "I can help with that. what are the questions?"},
-]
-DEFAULT_CONVERSATION_SUMMARY = "User is asking for Branham teaching on faith and supporting quotes."
+]"""
+DEFAULT_CONVERSATION_SUMMARY = "" #"User is asking for Branham teaching on faith and supporting quotes."
 DEFAULT_CONVERSATION_ID = "manual-debug-conversation"
 
 LOG_DIR = Path("data/logs/chat_flow")
@@ -92,6 +99,32 @@ def _extract_external_info(tool_outputs: list[dict[str, Any]]) -> dict[str, Any]
     return None
 
 
+def _summarize_llm_tool_calls(llm_traces: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize whether tools were offered and requested in model traces."""
+    offered_counts: list[int] = []
+    requested_counts: list[int] = []
+    requested_names: list[str] = []
+    for trace in llm_traces:
+        req = trace.get("request", {})
+        resp = trace.get("response", {})
+        tools = req.get("tools") or []
+        offered_counts.append(len(tools))
+        tcalls = resp.get("tool_calls") or []
+        requested_counts.append(len(tcalls))
+        for tc in tcalls:
+            fn = tc.get("function", {})
+            name = fn.get("name")
+            if isinstance(name, str) and name:
+                requested_names.append(name)
+    return {
+        "iterations": len(llm_traces),
+        "tools_offered_per_iteration": offered_counts,
+        "tools_requested_per_iteration": requested_counts,
+        "total_tools_requested": sum(requested_counts),
+        "requested_tool_names": requested_names,
+    }
+
+
 def main() -> None:
     logger = _setup_logging()
 
@@ -102,12 +135,34 @@ def main() -> None:
 
     runtime = get_chat_runtime()
 
+    parser = argparse.ArgumentParser(description="Manual full-flow chat debugger (non-stream).")
+    parser.add_argument("--query", type=str, default=None, help="Override query text.")
+    parser.add_argument(
+        "--query-file",
+        type=str,
+        default=None,
+        help="Path to a UTF-8 text file containing the query.",
+    )
+    parser.add_argument(
+        "--user-language",
+        type=str,
+        default=None,
+        help="Optional ISO language code hint (e.g. es, ja, af).",
+    )
+    args = parser.parse_args()
+
+    query = DEFAULT_QUERY
+    if args.query_file:
+        query = Path(args.query_file).read_text(encoding="utf-8").strip()
+    elif args.query:
+        query = args.query.strip()
+
     request = SimpleNamespace(
         conversation_id=DEFAULT_CONVERSATION_ID,
-        query=DEFAULT_QUERY,
+        query=query,
         history_window=DEFAULT_HISTORY_WINDOW,
         conversation_summary=DEFAULT_CONVERSATION_SUMMARY,
-        user_language=None,
+        user_language=args.user_language,
     )
 
     logger.debug("Starting full-flow run for conversation_id=%s", request.conversation_id)
@@ -131,6 +186,74 @@ def main() -> None:
     }
 
     try:
+        # ---- English-only language gate (match API route behavior) ----
+        if not _is_english_request(query=request.query, user_language=request.user_language):
+            system_prompt = (
+                "You are a translator.\n"
+                "Task: translate the provided English message into the user's language.\n"
+                "Output rules (hard):\n"
+                "- Output markdown only.\n"
+                "- Output EXACTLY two lines:\n"
+                "  1) Answer:\n"
+                "  2) <one short paragraph in the user's language>\n"
+                "- Do NOT add any other lines.\n"
+                "- Do NOT include citations or sermon claims.\n"
+            )
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": (
+                        f"User query language reference (do not answer it):\n{request.query}\n\n"
+                        f"English message to translate:\n{_ENGLISH_ONLY_MESSAGE}"
+                    ),
+                },
+            ]
+            _dump_json(LATEST_LLM_MESSAGES, messages)
+            logger.debug("LLM input messages written: %s", LATEST_LLM_MESSAGES.resolve())
+
+            response = runtime.llm_client.completion(
+                messages=messages,
+                tools=None,
+                tool_choice="none",
+            )
+            content = _normalize_english_only_reply(
+                (getattr(response.choices[0].message, "content", None) or "").strip()
+            )
+            _dump_json(
+                LATEST_LLM_TRACES,
+                [
+                    {
+                        "request": {"messages": messages, "tools": None},
+                        "response": {"content": content, "tool_calls": []},
+                    }
+                ],
+            )
+            run_report["retrieval"] = {"skipped": True, "reason": "english_only_gate"}
+            run_report["tool_outputs"] = []
+            run_report["tool_call_counts"] = {"db_search": 0, "biography_search": 0, "internet_search": 0}
+            run_report["tool_total_exhausted"] = False
+            run_report["tool_limit_event_count"] = 0
+            run_report["tool_limit_events"] = []
+            run_report["llm_tool_call_trace"] = {
+                "iterations": 1,
+                "tools_offered_per_iteration": [0],
+                "tools_requested_per_iteration": [0],
+                "total_tools_requested": 0,
+                "requested_tool_names": [],
+            }
+            run_report["postcheck"] = {"mode": "answer", "issues": []}
+            run_report["llm_provider"] = llm_cfg.provider
+            run_report["llm_model"] = llm_cfg.effective_model
+            run_report["final"] = {
+                "mode": "answer",
+                "answer": content,
+                "external_info": None,
+                "conversation_summary_out": None,
+            }
+            _dump_markdown_and_logs(run_report, logger)
+            return
+
         retrieval_result = runtime.retrieve(
             retrieval_query,
             user_language=request.user_language,
@@ -192,11 +315,19 @@ def main() -> None:
             external_info=external_info,
             refusal_message=_get_fixed_refusal_message(),
         )
+        checked = _maybe_override_refusal_for_allowed_query(
+            runtime=runtime,
+            query=request.query,
+            checked=checked,
+        )
         run_report["tool_outputs"] = loop_result.tool_outputs
         run_report["tool_call_counts"] = runtime.tool_registry.call_counts()
         run_report["tool_total_exhausted"] = runtime.tool_registry.total_exhausted
         run_report["tool_limit_event_count"] = len(tool_limit_events)
         run_report["tool_limit_events"] = tool_limit_events
+        run_report["llm_tool_call_trace"] = _summarize_llm_tool_calls(
+            loop_result.llm_traces
+        )
         run_report["postcheck"] = {"mode": checked.mode, "issues": checked.issues}
         run_report["llm_provider"] = llm_cfg.provider
         run_report["llm_model"] = llm_cfg.effective_model

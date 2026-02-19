@@ -9,7 +9,7 @@ The project is being built as a **RAG-first system** with the following V1 archi
 | Embedding   | `Qwen/Qwen3-Embedding-0.6B`  | vLLM          | Yes |
 | Reranker    | `Qwen/Qwen3-Reranker-0.6B`   | vLLM          | No (disabled by default) |
 | Generation  | External API (configurable)  | LiteLLM       | Yes |
-| Lang Detect | `langid` (bundled)           | In-process    | Yes |
+| Lang Gate   | Deterministic (English-only) | In-process    | Yes |
 
 See `.cursor/rules/design_spec.md` for complete architecture details.
 See `config/default.yaml` for all configuration options.
@@ -60,8 +60,7 @@ See `config/default.yaml` for all configuration options.
 - ✅ `core/pipeline/rag_pipeline.py` — Main orchestrator
 - ✅ `config.py` — Config loader (reads from `config/default.yaml`)
 - ✅ Reranker integration (configurable: never/conditional/always, default: never)
-- ✅ **Language detection** (`langid`) — BM25 skip for non-English queries
-- ✅ **Multilingual test harness** (15 queries: ES, FR, DE, PT, ZH, KO, RU, EN)
+- ✅ **English-only language gate** — Non-English queries stream a polite decline in the user’s language and skip retrieval/tools
 - ✅ **Model warmup script** — `prefetch_hf_model.py --warm` for zero first-request latency
 
 ---

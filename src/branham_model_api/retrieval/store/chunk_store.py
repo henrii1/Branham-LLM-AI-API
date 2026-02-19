@@ -18,6 +18,7 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
+import re
 
 
 @dataclass(frozen=True)
@@ -316,6 +317,46 @@ class ChunkStore:
             for row in cur.fetchall()
         ]
 
+    def search_paragraphs_by_text_many(
+        self,
+        query: str,
+        *,
+        date_ids: Sequence[str],
+        limit: int = 40,
+    ) -> list[ParagraphRecord]:
+        """
+        Search canonical paragraphs by substring, restricted to a set of date_ids.
+
+        This supports "date_id prefix" expansion in tools (e.g. "63-1201" -> multiple suffix sermons).
+        """
+        if not date_ids:
+            return []
+        q = f"%{query}%"
+        placeholders = ",".join("?" for _ in date_ids)
+        cur = self._conn.execute(
+            f"""
+            SELECT date_id, paragraph_no, sub_id, text
+            FROM paragraphs
+            WHERE date_id IN ({placeholders}) AND text LIKE ?
+            ORDER BY
+              date_id ASC,
+              paragraph_no ASC,
+              CASE WHEN sub_id = '' THEN 0 ELSE 1 END ASC,
+              sub_id ASC
+            LIMIT ?
+            """,
+            (*tuple(date_ids), q, limit),
+        )
+        return [
+            ParagraphRecord(
+                date_id=row["date_id"],
+                paragraph_no=int(row["paragraph_no"]),
+                sub_id=row["sub_id"] or "",
+                text=row["text"] or "",
+            )
+            for row in cur.fetchall()
+        ]
+
     def get_paragraph_bounds(self, date_id: str) -> tuple[int, int] | None:
         """Return (min_paragraph_no, max_paragraph_no) for a sermon."""
         cur = self._conn.execute(
@@ -451,6 +492,74 @@ class ChunkStore:
             language=row["language"] or "en",
         )
 
+    def search_sermons_by_title(
+        self,
+        title_query: str,
+        *,
+        year: int | str | None = None,
+        date_id_hint: str | None = None,
+        limit: int = 10,
+    ) -> list[SermonRecord]:
+        """
+        Fuzzy search sermons by title.
+
+        - Uses LIKE with NOCASE (SQLite-friendly ILIKE equivalent).
+        - If year is provided (e.g. 63 or "1963"), filters date_id by YY- prefix.
+        - If date_id_hint is provided (e.g. "63-0801"), filters date_id by prefix.
+        """
+        q = (title_query or "").strip()
+        if not q:
+            return []
+
+        # Build a forgiving LIKE pattern: "%token1%token2%..."
+        tokens = [t for t in re.split(r"[^A-Za-z0-9]+", q) if t]
+        if not tokens:
+            return []
+        like_pat = "%" + "%".join(tokens) + "%"
+
+        where = ["title LIKE ? COLLATE NOCASE"]
+        params: list[object] = [like_pat]
+
+        if date_id_hint:
+            where.append("date_id LIKE ?")
+            params.append(f"{date_id_hint.strip()}%")
+        elif year is not None:
+            y = str(year).strip()
+            # Accept 1963 -> 63, or "63" -> 63
+            yy_match = re.search(r"(\d{2})(?:\D|$)", y[-2:]) if len(y) >= 2 else None
+            yy = y[-2:] if yy_match is None else yy_match.group(1)
+            if yy.isdigit():
+                where.append("date_id LIKE ?")
+                params.append(f"{yy}-%")
+
+        try:
+            lim = int(limit)
+        except (TypeError, ValueError):
+            lim = 10
+        lim = max(1, min(lim, 50))
+
+        cur = self._conn.execute(
+            f"""
+            SELECT date_id, title, source, language
+            FROM sermons
+            WHERE {" AND ".join(where)}
+            ORDER BY date_id ASC
+            LIMIT ?
+            """,
+            (*params, lim),
+        )
+        out: list[SermonRecord] = []
+        for row in cur.fetchall():
+            out.append(
+                SermonRecord(
+                    date_id=row["date_id"],
+                    title=row["title"],
+                    source=row["source"],
+                    language=row["language"] or "en",
+                )
+            )
+        return out
+
     def get_sermons(self, date_ids: Sequence[str]) -> dict[str, SermonRecord]:
         """Batch lookup of sermon metadata."""
         if not date_ids:
@@ -475,6 +584,45 @@ class ChunkStore:
                 language=row["language"] or "en",
             )
         return result
+
+    def search_sermons_by_date_id_prefix(
+        self,
+        date_id_prefix: str,
+        *,
+        limit: int = 10,
+    ) -> list[SermonRecord]:
+        """
+        Search sermons by date_id prefix, e.g. "63-1201" -> ["63-1201M", "63-1201E"].
+        """
+        pfx = (date_id_prefix or "").strip()
+        if not pfx:
+            return []
+        try:
+            lim = int(limit)
+        except (TypeError, ValueError):
+            lim = 10
+        lim = max(1, min(lim, 50))
+        cur = self._conn.execute(
+            """
+            SELECT date_id, title, source, language
+            FROM sermons
+            WHERE date_id LIKE ?
+            ORDER BY date_id ASC
+            LIMIT ?
+            """,
+            (f"{pfx}%", lim),
+        )
+        out: list[SermonRecord] = []
+        for row in cur.fetchall():
+            out.append(
+                SermonRecord(
+                    date_id=row["date_id"],
+                    title=row["title"],
+                    source=row["source"],
+                    language=row["language"] or "en",
+                )
+            )
+        return out
 
     def get_chunk_count(self) -> int:
         """Get total number of chunks in the database."""

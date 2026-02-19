@@ -52,11 +52,16 @@ This API is the *only* AI endpoint called by the web app (Next.js + Supabase).
 - Sermon titles may appear in other languages (model may infer due to pretraining), but **date_id is the canonical and stable locator**.
 - We do not rely on char/token offsets; paragraph range is the location anchor.
 
-### 1.3 Multilingual behavior (v1)
-- v1 will index **English corpus** only.
-- Users may query in other languages.
-- Generator outputs answer in user's language.
-- References remain in the canonical format: date_id + paragraph range + chunk_ids.
+### 1.3 Multilingual behavior (current)
+- The sermon corpus is **English-only**.
+- **Current product decision: English-only queries are supported.**
+- If the user’s query is not English, the API **politely declines in the user’s language** and asks them to re-ask in English.
+- Non-English requests **skip retrieval and skip tools** (to avoid ungrounded answers and inconsistent citation discipline).
+- Language detection is intentionally lightweight and deterministic:
+  - If the client sends `user_language` and it does not start with `en`, it is treated as non-English.
+  - Otherwise, queries containing non-ASCII alphabetic characters (CJK / accented Latin / Cyrillic, etc.) are treated as non-English.
+  - **Important limitation**: non-English queries written using ASCII only (e.g., Spanish without accents) may not be detected unless the client supplies `user_language`.
+- Multilingual sermon-grounded answering is planned for a future version (requires stronger cross-language grounding + citation discipline).
 
 ---
 
@@ -168,40 +173,12 @@ reranker:
 uv run python scripts/prefetch_hf_model.py --all --skip-reranker --target-dir ./.hf-cache
 ```
 
-### 3.6 Language Detection & BM25 Skip
+### 3.6 Language handling (current)
 
-**Problem**: BM25 is keyword-based and only works with English corpus. Non-English queries (French, Spanish, German, Chinese, etc.) return irrelevant BM25 hits that pollute fusion results.
+We currently **gate to English-only queries** at the API boundary (see Section 1.3).
 
-**Solution**: Detect query language and skip BM25 for non-English queries, relying solely on dense retrieval (which uses a multilingual embedder).
-
-**Library**: `langid` (pure Python, 97 languages, ~0.15ms per query after warmup)
-
-**Implementation** (`rag_pipeline.py`):
-```python
-def detect_query_language(query: str) -> str:
-    """Returns 'en' for English, 'non-en' for other languages."""
-    import langid
-    lang_code, score = langid.classify(query)
-    return "en" if lang_code == "en" else "non-en"
-```
-
-**Pipeline behavior**:
-| Query Language | BM25 | Dense | Refusal Check |
-|----------------|------|-------|---------------|
-| English | ✓ | ✓ | dense_top_score < 0.55 |
-| Non-English | ✗ (skipped) | ✓ | dense_top_score < 0.55 |
-
-**Latency**:
-- Cold start (model load): ~846ms (paid once at container startup)
-- Per-query: ~0.15ms (negligible)
-
-**Container startup**: langid is warmed via prefetch script:
-```bash
-uv run python scripts/prefetch_hf_model.py --all --target-dir ./.hf-cache
-# Includes: HF model download + langid warm
-```
-
-**Refusal works for all languages**: Refusal check uses `dense_top_score` (semantic similarity from multilingual embedder), not BM25. Off-topic queries in any language are correctly refused.
+Notes:
+- The config retains `retrieval.language_detection` knobs for future multilingual support work, but multilingual retrieval/answering is not considered a V1 requirement under the current decision.
 
 ---
 

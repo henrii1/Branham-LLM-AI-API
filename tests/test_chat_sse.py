@@ -139,6 +139,17 @@ class _BibleExceptionRuntime:
         return SimpleNamespace(should_refuse=True, expanded_sermons=[])
 
 
+class _ComparisonExceptionRuntime:
+    def __init__(self):
+        self.llm_client = _FakeLLMClient(
+            chunks=[_chunk("Comparison answer between Branham and other authors.")]
+        )
+        self.tool_registry = _FakeToolRegistry()
+
+    def retrieve(self, retrieval_query: str, **kw):
+        return SimpleNamespace(should_refuse=True, expanded_sermons=[])
+
+
 class _ExternalRuntime:
     """Simulates a flow where the serper tool was called (external_used)."""
 
@@ -201,6 +212,35 @@ class _SummaryRuntime:
     def summarize_conversation(self, *, query, answer, prior_summary, mode):
         assert mode == "answer"
         return "generated summary metadata"
+
+
+class _BibleFallbackLLMClient:
+    def stream_completion(self, *, messages, tools=None, tool_choice=None, **kw):
+        return iter(
+            [
+                _chunk("I can only answer questions based on William Branham's sermons. "),
+                _chunk("I don't have enough relevant information to answer your question."),
+            ]
+        )
+
+    def completion(self, *, messages, max_tokens=None, **kw):
+        system = (messages[0].get("content") or "").lower()
+        if "bible-query mode" in system:
+            content = "In 1 Corinthians 12, spiritual gifts are distributed by the Holy Spirit without a gender-only gift list."
+        else:
+            content = "short summary"
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+        )
+
+
+class _BibleFallbackRuntime:
+    def __init__(self):
+        self.llm_client = _BibleFallbackLLMClient()
+        self.tool_registry = _FakeToolRegistry()
+
+    def retrieve(self, retrieval_query: str, **kw):
+        return SimpleNamespace(should_refuse=False, expanded_sermons=[])
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +333,25 @@ def test_chat_sse_bible_exception_can_bypass_early_refusal(monkeypatch):
     assert "John 3:16" in final["answer"]
 
 
+def test_chat_sse_comparison_exception_can_bypass_early_refusal(monkeypatch):
+    monkeypatch.setattr(chat_route, "_get_expected_chat_bearer_key", lambda: "test-chat-key")
+    monkeypatch.setattr(chat_route, "get_chat_runtime", lambda: _ComparisonExceptionRuntime())
+    client = TestClient(app)
+    resp = client.post(
+        "/api/chat",
+        json={
+            "conversation_id": "c6",
+            "query": "Compare Branham and other authors on 1 Corinthians 12 gifts",
+        },
+        headers=_auth_headers(),
+    )
+    assert resp.status_code == 200
+    events = _parse_sse(resp.text)
+    final = [p for n, p in events if n == "final"][-1]
+    assert final["mode"] == "answer"
+    assert "Comparison answer" in final["answer"]
+
+
 def test_chat_sse_streams_token_deltas_for_normal_answer(monkeypatch):
     monkeypatch.setattr(chat_route, "_get_expected_chat_bearer_key", lambda: "test-chat-key")
     monkeypatch.setattr(chat_route, "get_chat_runtime", lambda: _StreamAnswerRuntime())
@@ -327,6 +386,22 @@ def test_chat_sse_streams_token_deltas_for_llm_refusal(monkeypatch):
     final = [p for n, p in events if n == "final"][-1]
     assert final["mode"] == "answer"
     assert "I can only answer questions" in final["answer"]
+
+
+def test_chat_sse_bible_query_uses_fallback_when_model_refuses(monkeypatch):
+    monkeypatch.setattr(chat_route, "_get_expected_chat_bearer_key", lambda: "test-chat-key")
+    monkeypatch.setattr(chat_route, "get_chat_runtime", lambda: _BibleFallbackRuntime())
+    client = TestClient(app)
+    resp = client.post(
+        "/api/chat",
+        json={"conversation_id": "c10", "query": "According to 1 Corinthians 12, are women limited in gifts?"},
+        headers=_auth_headers(),
+    )
+    assert resp.status_code == 200
+    events = _parse_sse(resp.text)
+    final = [p for n, p in events if n == "final"][-1]
+    assert final["mode"] == "answer"
+    assert "without a gender-only gift list" in final["answer"]
 
 
 def test_chat_sse_final_contains_generated_summary_metadata(monkeypatch):

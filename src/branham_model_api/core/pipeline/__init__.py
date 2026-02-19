@@ -65,6 +65,7 @@ from .postcheck import (
     PostcheckResult,
     finalize_answer,
     has_bible_reference,
+    is_comparison_query,
     has_sermon_reference,
     is_bible_query,
 )
@@ -88,6 +89,7 @@ __all__ = [
     "PostcheckResult",
     "finalize_answer",
     "is_bible_query",
+    "is_comparison_query",
     "has_sermon_reference",
     "has_bible_reference",
     # Protocols

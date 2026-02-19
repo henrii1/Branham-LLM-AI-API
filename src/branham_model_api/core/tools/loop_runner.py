@@ -55,7 +55,10 @@ class ToolLoopRunner:
         self.tool_registry = tool_registry
         self.max_iterations = max_iterations
 
-    def run(self, messages: list[dict[str, Any]]) -> ToolLoopResult:
+    def run(
+        self,
+        messages: list[dict[str, Any]],
+    ) -> ToolLoopResult:
         working_messages = list(messages)
         tool_outputs: list[dict[str, Any]] = []
         external_used = False
@@ -63,7 +66,7 @@ class ToolLoopRunner:
         last_content = ""
         self.tool_registry.reset_counts()
 
-        for _ in range(self.max_iterations):
+        for iteration in range(self.max_iterations):
             offer_tools = (
                 self.tool_registry.definitions()
                 if not self.tool_registry.total_exhausted

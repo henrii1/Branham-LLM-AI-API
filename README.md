@@ -61,9 +61,16 @@ See `.cursor/rules/design_spec.md` for the complete V1 architecture and reposito
 | Embedding   | `Qwen/Qwen3-Embedding-0.6B`  | vLLM          | Yes |
 | Reranker    | `Qwen/Qwen3-Reranker-0.6B`   | vLLM          | No (disabled by default) |
 | Generation  | External API (configurable)  | LiteLLM       | Yes |
-| Lang Detect | `langid` (bundled)           | In-process    | Yes |
+| Lang Gate   | Deterministic (see below)    | In-process    | Yes |
 
-**Multilingual Support:** Queries in any language are supported. The embedding model is multilingual (Qwen3). For non-English queries, BM25 is automatically skipped (keyword search doesn't work cross-language) and dense retrieval is used exclusively.
+**Language Support (current):** English-only.
+
+- If a user query is not English, the API streams a short, polite decline in the user’s language and asks them to re-ask in English.
+- Non-English requests skip retrieval and skip tools.
+- Detection is deterministic:
+  - If the client provides `user_language` and it is not English, it is treated as non-English.
+  - Otherwise, non-ASCII alphabetic characters (CJK / accented Latin / Cyrillic, etc.) trigger the non-English path.
+  - ASCII-only non-English queries may require the client to provide `user_language`.
 
 ### Implemented Flow Status
 
@@ -74,10 +81,10 @@ See `.cursor/rules/design_spec.md` for the complete V1 architecture and reposito
   - `biography_search`: 2 (hard), system prompt targets 1
   - `internet_search`: 2 (hard), system prompt targets 1
   - Total per request: 3 (hard), system prompt targets <=2
-- Post-check enforcement is active:
-  - canonical sermon citation requirement for non-Bible answers
-  - Bible-query exception path
-  - external section enforcement only when web tool is used
+- Post-check behavior (current):
+  - No refusal gating and no markdown normalization.
+  - Only appends/removes the `## Unverified / External Information` section when `internet_search` was used.
+  - Retrieval-time refusal remains the primary refusal mechanism.
 
 ### Request Contract
 
@@ -112,7 +119,6 @@ uv run python scripts/prefetch_hf_model.py --warm-only --skip-reranker --target-
 
 Warmup loads:
 - **Embedding model**: ~3-5 seconds (eliminates first-query latency)
-- **langid**: ~850ms (language detection)
 
 ### Container Image Scope (V1)
 

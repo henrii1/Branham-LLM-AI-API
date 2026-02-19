@@ -26,6 +26,7 @@ from branham_model_api.core.pipeline import (
     RetrievalConfig,
     create_rag_pipeline,
     finalize_answer,
+    is_comparison_query,
     is_bible_query,
 )
 from branham_model_api.core.prompts import (
@@ -64,6 +65,95 @@ def _get_fixed_refusal_message() -> str:
         )
     except Exception:
         return "I can only answer questions based on William Branham's sermons. I don't have enough relevant information to answer your question."
+
+
+_ENGLISH_ONLY_MESSAGE = (
+    "Sorry — this API currently supports English queries only. "
+    "We’re working to add multilingual support in the future. "
+    "Please re-ask your question in English."
+)
+
+
+def _is_english_request(*, query: str, user_language: str | None) -> bool:
+    """
+    Best-effort language gate.
+
+    The sermon corpus is English-only, so we currently accept English queries only.
+    This must be deterministic (do not rely on the model to self-enforce).
+
+    Rules:
+    - If the client explicitly supplies a user_language hint and it is not English,
+      treat as non-English.
+    - Otherwise: if the query contains any non-ASCII alphabetic character, treat as non-English.
+      (Catches CJK, accented Latin, Cyrillic, etc.)
+    """
+    ul = (user_language or "").strip().lower()
+    if ul:
+        # Accept common English tags: en, en-us, en_US, etc.
+        if ul.startswith("en"):
+            return True
+        return False
+
+    for ch in query:
+        if ch.isalpha() and not ch.isascii():
+            return False
+    return True
+
+
+def _normalize_english_only_reply(text: str) -> str:
+    """
+    Normalize the english-only gate response to exactly:
+      Answer:
+      <one short paragraph>
+
+    This runs ONLY on the english-only gate path (not on normal sermon answers).
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return "Answer:\n" + _ENGLISH_ONLY_MESSAGE
+
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    if not lines:
+        return "Answer:\n" + _ENGLISH_ONLY_MESSAGE
+
+    if lines[0] == "Answer:":
+        para = lines[1] if len(lines) > 1 else _ENGLISH_ONLY_MESSAGE
+        return "Answer:\n" + para
+
+    if lines[0].startswith("Answer:"):
+        after = lines[0][len("Answer:") :].strip()
+        if after:
+            return "Answer:\n" + after
+        para = lines[1] if len(lines) > 1 else _ENGLISH_ONLY_MESSAGE
+        return "Answer:\n" + para
+
+    return "Answer:\n" + lines[0]
+
+
+def _query_mode_prompt_addendum(query: str) -> str | None:
+    """Return runtime prompt addendum for Bible/comparison intents."""
+    if is_bible_query(query):
+        return (
+            "BIBLE-QUERY MODE:\n"
+            "- This query is in scope even when sermon retrieval is weak.\n"
+            "- Do not output the fixed Branham-sermon refusal just because sermon chunks are weak.\n"
+            "- Answer from biblical context directly.\n"
+            "- If there are multiple mainstream interpretations, summarize them briefly and neutrally.\n"
+            "- Do NOT write fallback language like 'the provided/current sermon context does not contain...'.\n"
+            "- If there are no sermon citations in your answer, do NOT include `References: [N/A]` and do NOT include `Reader Note:` / The Table link.\n"
+            "- Never mention internal mechanics (RAG/tools/retrieval pipeline)."
+        )
+    if is_comparison_query(query):
+        return (
+            "COMPARISON MODE (Branham vs other authors/preachers/sermons):\n"
+            "- This query is in scope.\n"
+            "- Do not output the fixed Branham-sermon refusal just because one side is weak.\n"
+            "- Provide a balanced comparison.\n"
+            "- Branham-side claims must remain sermon-grounded when possible.\n"
+            "- If no sermon citations are used in the final answer, do NOT include `Reader Note:` / The Table link.\n"
+            "- If non-Branham side lacks direct evidence in context, state that limitation plainly."
+        )
+    return None
 
 
 def _get_expected_chat_bearer_key() -> str:
@@ -170,7 +260,8 @@ class ChatRuntime:
     def generate(self, request: ChatRequest, rag_context: str):
         """Non-streaming generate (kept for test_chat_full_flow.py)."""
         system_prompt = build_system_prompt(
-            refusal_message=_get_fixed_refusal_message()
+            refusal_message=_get_fixed_refusal_message(),
+            extra_instructions=_query_mode_prompt_addendum(request.query),
         )
         messages = build_chat_messages(
             system_prompt=system_prompt,
@@ -212,9 +303,9 @@ class ChatRuntime:
             "Create a compact conversation summary for frontend memory handoff.\n"
             "Rules:\n"
             "- Output plain text only (no markdown).\n"
-            "- Max 2 short sentences.\n"
-            "- Keep the same language as the user query.\n"
-            "- Include: user intent, key grounded outcome, and next context needed.\n"
+            "- Ensure that the summary is rich as it will be fed into a sermon retrieval system\n"
+            "- Keep the same language as the ai respons to user's query\n"
+            "- keep it concise but relevant to assist the next query retrieve the best context from Rag, we send new query + summary into RAG\n"
             f"- Final mode was: {mode}.\n"
             "- If refusal, summarize why briefly.\n"
         )
@@ -395,6 +486,76 @@ def _safe_conversation_summary(
         return fallback
 
 
+def _generate_allowed_query_fallback(
+    *,
+    runtime: Any,
+    query: str,
+    is_bible: bool,
+) -> str | None:
+    """
+    Generate a non-refusal fallback for allowed non-sermon intents.
+
+    This is used only when the primary pass produced a refusal-style output
+    for intents that should not be hard-refused (Bible-only and comparison).
+    """
+    addendum = _query_mode_prompt_addendum(query) or (
+        "ALLOWED-QUERY FALLBACK MODE:\n"
+        "- Do not output the fixed Branham-sermon refusal.\n"
+        "- Answer the user directly and concisely."
+    )
+    system = build_system_prompt(
+        refusal_message=_get_fixed_refusal_message(),
+        extra_instructions=(
+            addendum
+            + "\n"
+            + "- Previous draft incorrectly refused this allowed query; provide a compliant answer now."
+        ),
+    )
+    try:
+        resp = runtime.llm_client.completion(
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": query},
+            ],
+            max_tokens=320,
+        )
+        text = (resp.choices[0].message.content or "").strip()
+        if not text:
+            return None
+        if text == _get_fixed_refusal_message():
+            return None
+        return text
+    except Exception as exc:
+        logger.warning("Allowed-query fallback generation failed: %s", exc)
+        return None
+
+
+def _maybe_override_refusal_for_allowed_query(
+    *,
+    runtime: Any,
+    query: str,
+    checked: Any,
+) -> Any:
+    """Convert refusal to answer for Bible/comparison intents when fallback succeeds."""
+    if getattr(checked, "mode", "") != "refusal":
+        return checked
+    bible = is_bible_query(query)
+    comparison = is_comparison_query(query)
+    if not (bible or comparison):
+        return checked
+    fallback = _generate_allowed_query_fallback(
+        runtime=runtime,
+        query=query,
+        is_bible=bible,
+    )
+    if not fallback:
+        return checked
+    checked.mode = "answer"
+    checked.answer = fallback
+    checked.external_info = None
+    return checked
+
+
 @router.post("/chat")
 async def chat(
     request: ChatRequest,
@@ -420,6 +581,64 @@ async def chat(
             {"conversation_id": request.conversation_id},
         )
         runtime = get_chat_runtime()
+
+        # ---- English-only language gate (deterministic) ----
+        if not _is_english_request(query=request.query, user_language=request.user_language):
+            system_prompt = (
+                "You are a translator.\n"
+                "Task: translate the provided English message into the user's language.\n"
+                "Output rules (hard):\n"
+                "- Output markdown only.\n"
+                "- Output EXACTLY two lines:\n"
+                "  1) Answer:\n"
+                "  2) <one short paragraph in the user's language>\n"
+                "- Do NOT add any other lines.\n"
+                "- Do NOT include citations or sermon claims.\n"
+            )
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": (
+                        f"User query language reference (do not answer it):\n{request.query}\n\n"
+                        f"English message to translate:\n{_ENGLISH_ONLY_MESSAGE}"
+                    ),
+                },
+            ]
+
+            t_first_delta: float | None = None
+            parts: list[str] = []
+            for chunk in runtime.llm_client.stream_completion(
+                messages=messages,
+                tools=None,
+                tool_choice="none",
+            ):
+                text = _extract_delta_text(chunk)
+                if not text:
+                    continue
+                if t_first_delta is None:
+                    t_first_delta = time.perf_counter()
+                parts.append(text)
+                yield _sse_event("delta", {"text": text})
+
+            final_text = _normalize_english_only_reply(("".join(parts) or "").strip())
+            yield _sse_event(
+                "final",
+                {
+                    "mode": "answer",
+                    "answer": final_text,
+                    "external_info": None,
+                    "conversation_summary": None,
+                },
+            )
+            yield _sse_event("done", {"ok": True})
+            logger.info(
+                "TTFT(english_only)=%.0fms total=%.0fms",
+                ((t_first_delta - t_request) * 1000) if t_first_delta else -1,
+                (time.perf_counter() - t_request) * 1000,
+            )
+            return
+
         retrieval_query = build_retrieval_query(
             request.query,
             request.conversation_summary,
@@ -434,7 +653,9 @@ async def chat(
             t_retrieval_ms = (time.perf_counter() - t_retrieval_start) * 1000
             logger.info("Retrieval completed in %.1fms", t_retrieval_ms)
 
-            if retrieval_result.should_refuse and not is_bible_query(request.query):
+            if retrieval_result.should_refuse and not (
+                is_bible_query(request.query) or is_comparison_query(request.query)
+            ):
                 refusal = _get_fixed_refusal_message()
                 yield _sse_event("delta", {"text": refusal})
                 yield _sse_event(
@@ -457,7 +678,8 @@ async def chat(
             # ---- Build messages ----
             rag_context = build_rag_context(retrieval_result.expanded_sermons)
             system_prompt = build_system_prompt(
-                refusal_message=_get_fixed_refusal_message()
+                refusal_message=_get_fixed_refusal_message(),
+                extra_instructions=_query_mode_prompt_addendum(request.query),
             )
             working_messages = build_chat_messages(
                 system_prompt=system_prompt,
@@ -615,6 +837,11 @@ async def chat(
                     answer=streamed_answer,
                     external_info=external_info,
                     refusal_message=_get_fixed_refusal_message(),
+                )
+                checked = _maybe_override_refusal_for_allowed_query(
+                    runtime=runtime,
+                    query=request.query,
+                    checked=checked,
                 )
                 summary = _safe_conversation_summary(
                     runtime=runtime,

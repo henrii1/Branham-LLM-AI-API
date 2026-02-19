@@ -59,10 +59,22 @@ def _build_test_db(path: Path) -> None:
     conn.execute(
         "INSERT INTO sermons(date_id, title, source, language) VALUES ('63-0318E','The Spoken Word Is The Original Seed','src','en')"
     )
+    # Add a same-day suffix variant to test prefix expansion behavior
+    conn.execute(
+        "INSERT INTO sermons(date_id, title, source, language) VALUES ('63-0318M','The Spoken Word Is The Original Seed','src','en')"
+    )
+    # Add title duplicates to test fuzzy resolution + year disambiguation
+    conn.execute(
+        "INSERT INTO sermons(date_id, title, source, language) VALUES ('62-0128A','A PARADOX','src','en')"
+    )
+    conn.execute(
+        "INSERT INTO sermons(date_id, title, source, language) VALUES ('63-0801','A PARADOX','src','en')"
+    )
     rows = [
         ("47-0412M_c1", "47-0412M", 1, 2, 0, "Faith text first.", 3, 20),
         ("47-0412M_c2", "47-0412M", 3, 4, 1, "Faith text second.", 3, 21),
         ("63-0318E_c1", "63-0318E", 10, 12, 0, "Seed sermon content.", 3, 20),
+        ("63-0318M_c1", "63-0318M", 10, 12, 0, "Seed sermon (morning) content.", 3, 28),
     ]
     conn.executemany(
         """
@@ -81,6 +93,17 @@ def _build_test_db(path: Path) -> None:
         ("63-0318E", 10, "", "Seed sermon content."),
         ("63-0318E", 11, "", "Seed sermon continuation."),
         ("63-0318E", 12, "", "Seed sermon ending."),
+        ("63-0318M", 10, "", "Seed sermon morning content."),
+        ("63-0318M", 11, "", "Seed sermon morning M_ONLY continuation."),
+        ("63-0318M", 12, "", "Seed sermon morning ending."),
+        ("62-0128A", 30, "", "Paradox older paragraph 30."),
+        ("62-0128A", 31, "", "Paradox older paragraph 31."),
+        ("62-0128A", 32, "", "Paradox older paragraph 32."),
+        ("63-0801", 29, "", "Paradox 1963 paragraph 29."),
+        ("63-0801", 30, "", "Paradox 1963 paragraph 30."),
+        ("63-0801", 31, "", "Paradox 1963 paragraph 31 story."),
+        ("63-0801", 32, "", "Paradox 1963 paragraph 32."),
+        ("63-0801", 33, "", "Paradox 1963 paragraph 33."),
     ]
     conn.executemany(
         """
@@ -137,6 +160,97 @@ def test_db_search_tool_read_sermon_default_head_and_override(tmp_path: Path) ->
     overridden = tool.execute({"mode": "read_sermon", "date_id": "47-0412M", "head": 3})
     paragraphs_override = overridden["sermons"][0]["ranges"][0]["paragraphs"]
     assert len(paragraphs_override) == 3
+
+
+def test_db_search_tool_can_resolve_title_only_for_read_sermon(tmp_path: Path) -> None:
+    db_path = tmp_path / "chunks.sqlite"
+    _build_test_db(db_path)
+    store = ChunkStore(db_path)
+    tool = DbSearchTool(chunk_store=store, max_paragraphs_per_query=80, default_sermon_head=2)
+
+    out = tool.execute({"mode": "read_sermon", "title_query": "A Paradox"})
+    assert out["ok"] is True
+    assert out["sermons"][0]["date_id"] in ("62-0128A", "63-0801")
+    assert "resolution" in out
+
+
+def test_db_search_tool_resolves_title_plus_year_and_reads_context_paragraph(tmp_path: Path) -> None:
+    db_path = tmp_path / "chunks.sqlite"
+    _build_test_db(db_path)
+    store = ChunkStore(db_path)
+    tool = DbSearchTool(chunk_store=store)
+
+    out = tool.execute(
+        {"mode": "read_paragraphs", "title_query": "A Paradox", "year": 63, "paragraph_start": 31}
+    )
+    assert out["ok"] is True
+    assert out["sermons"][0]["date_id"] == "63-0801"
+    paras = out["sermons"][0]["ranges"][0]["paragraphs"]
+    # Default ±2 context => 29..33
+    nos = [p["paragraph_no"] for p in paras]
+    assert min(nos) == 29
+    assert max(nos) == 33
+
+
+def test_db_search_tool_resolves_date_id_prefix(tmp_path: Path) -> None:
+    db_path = tmp_path / "chunks.sqlite"
+    _build_test_db(db_path)
+    store = ChunkStore(db_path)
+    tool = DbSearchTool(chunk_store=store)
+
+    # Test DB includes "63-0318E" and "63-0318M"; prefix should expand to both.
+    out = tool.execute(
+        {"mode": "read_paragraphs", "date_id": "63-0318", "paragraph_start": 10, "paragraph_end": 11}
+    )
+    assert out["ok"] is True
+    assert {s["date_id"] for s in out["sermons"]} == {"63-0318E", "63-0318M"}
+
+
+def test_db_search_tool_read_sermon_splits_head_across_prefix_suffixes(tmp_path: Path) -> None:
+    db_path = tmp_path / "chunks.sqlite"
+    _build_test_db(db_path)
+    store = ChunkStore(db_path)
+    tool = DbSearchTool(chunk_store=store)
+
+    out = tool.execute({"mode": "read_sermon", "date_id": "63-0318", "head": 6})
+    assert out["ok"] is True
+    assert {s["date_id"] for s in out["sermons"]} == {"63-0318E", "63-0318M"}
+    # head=6, two suffix sermons => 3 paragraphs each
+    counts = {s["date_id"]: len(s["ranges"][0]["paragraphs"]) for s in out["sermons"]}
+    assert counts["63-0318E"] == 3
+    assert counts["63-0318M"] == 3
+
+
+def test_db_search_tool_quote_local_searches_across_prefix_suffixes(tmp_path: Path) -> None:
+    db_path = tmp_path / "chunks.sqlite"
+    _build_test_db(db_path)
+    store = ChunkStore(db_path)
+    tool = DbSearchTool(chunk_store=store)
+
+    out = tool.execute(
+        {"mode": "search_quote_local", "date_id": "63-0318", "query": "M_ONLY", "limit": 5}
+    )
+    assert out["ok"] is True
+    assert any(s["date_id"] == "63-0318M" for s in out["sermons"])
+
+
+def test_db_search_tool_falls_back_to_title_when_date_id_unknown(tmp_path: Path) -> None:
+    db_path = tmp_path / "chunks.sqlite"
+    _build_test_db(db_path)
+    store = ChunkStore(db_path)
+    tool = DbSearchTool(chunk_store=store)
+
+    out = tool.execute(
+        {
+            "mode": "read_paragraphs",
+            "date_id": "63-1201",  # unknown in test DB
+            "title_query": "A Paradox",
+            "year": 63,
+            "paragraph_start": 31,
+        }
+    )
+    assert out["ok"] is True
+    assert out["sermons"][0]["date_id"] == "63-0801"
 
 
 def test_db_search_tool_invalid_range_reports_bounds(tmp_path: Path) -> None:

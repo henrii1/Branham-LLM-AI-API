@@ -115,6 +115,7 @@ def build_system_prompt(
     *,
     refusal_message: str,
     base_prompt_path: Path | None = None,
+    extra_instructions: str | None = None,
 ) -> str:
     """
     Build runtime system prompt with dynamic refusal message injection.
@@ -125,8 +126,20 @@ def build_system_prompt(
     base = load_system_prompt(base_prompt_path)
     placeholder = "{{REFUSAL_MESSAGE}}"
     if placeholder in base:
-        return base.replace(placeholder, refusal_message).strip()
-    return (base + f'\n\nRefusal message: "{refusal_message}"').strip()
+        rendered = base.replace(placeholder, refusal_message).strip()
+    else:
+        rendered = (base + f'\n\nRefusal message: "{refusal_message}"').strip()
+
+    extra = (extra_instructions or "").strip()
+    if extra:
+        rendered = (
+            rendered
+            + "\n\n"
+            + "MODE-SPECIFIC ADDENDUM (RUNTIME)\n"
+            + "────────────────────────────────────────────────────────────\n"
+            + extra
+        ).strip()
+    return rendered
 
 
 def build_chat_messages(
@@ -143,7 +156,9 @@ def build_chat_messages(
       query + optional history + rag context
     """
     history_text = format_history_window(history_window)
-    user_parts = [query.strip()]
+    user_parts = [
+        "User query (may be multi-part; answer every part):\n" + query.strip()
+    ]
     if history_text:
         user_parts.append("Recent chat history:\n" + history_text)
     user_parts.append("RAG context:\n" + rag_context)

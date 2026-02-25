@@ -61,9 +61,31 @@ class Reranker:
         self.device = get_device(cfg.device_preference)
         self.dtype = get_dtype(cfg.dtype)
 
+        # Offline-only: resolve repo ids to local snapshot path to avoid any Hub calls.
+        model_ref: str = cfg.model_id
+        if cfg.local_files_only:
+            import os
+            from pathlib import Path
+
+            if "/" in cfg.model_id and not Path(cfg.model_id).exists():
+                try:
+                    from huggingface_hub import snapshot_download
+
+                    model_ref = snapshot_download(
+                        repo_id=cfg.model_id,
+                        local_files_only=True,
+                        cache_dir=cfg.cache_dir,
+                    )
+                except Exception as e:
+                    raise RuntimeError(
+                        f"Offline-only load failed for reranker model {cfg.model_id!r}. "
+                        f"Ensure it is already present in the local HF cache (HF_HOME={os.getenv('HF_HOME','')!r}). "
+                        f"Original error: {e}"
+                    ) from e
+
         # Load tokenizer with left padding (required for Qwen)
         self.tokenizer = AutoTokenizer.from_pretrained(
-            cfg.model_id,
+            model_ref,
             padding_side="left",
             trust_remote_code=cfg.trust_remote_code,
             local_files_only=cfg.local_files_only,
@@ -72,7 +94,7 @@ class Reranker:
 
         # Load model
         self.model = AutoModelForCausalLM.from_pretrained(
-            cfg.model_id,
+            model_ref,
             trust_remote_code=cfg.trust_remote_code,
             local_files_only=cfg.local_files_only,
             cache_dir=cfg.cache_dir,

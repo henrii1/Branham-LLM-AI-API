@@ -103,6 +103,9 @@ def _stream_query(query: str, idx: int) -> dict:
                                 t_first_delta = time.perf_counter()
                             text = evt_data.get("text", "")
                             answer_parts.append(text)
+                        elif evt_type == "rag":
+                            # Retrieval-first evidence event; ignore for timing stats here.
+                            pass
                         elif evt_type == "final":
                             final_event = evt_data
 
@@ -114,6 +117,8 @@ def _stream_query(query: str, idx: int) -> dict:
                         if t_first_delta is None:
                             t_first_delta = time.perf_counter()
                         answer_parts.append(evt_data.get("text", ""))
+                    elif evt_type == "rag":
+                        pass
                     elif evt_type == "final":
                         final_event = evt_data
 

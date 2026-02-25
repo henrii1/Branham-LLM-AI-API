@@ -60,6 +60,7 @@ def profile_query(query: str, bearer_key: str) -> dict:
 
     t_start = time.perf_counter()
     t_first_delta = None
+    t_rag = None
     mode = "unknown"
     answer_preview = ""
     delta_count = 0
@@ -84,6 +85,10 @@ def profile_query(query: str, bearer_key: str) -> dict:
                         text = data.get("text", "")
                         if len(answer_preview) < 80:
                             answer_preview += text
+                    elif current_event == "rag":
+                        # Retrieval-first evidence event; not counted toward TTFT.
+                        if t_rag is None:
+                            t_rag = time.perf_counter()
                     elif current_event == "final":
                         mode = data.get("mode", "unknown")
                     elif current_event == "done":
@@ -91,10 +96,12 @@ def profile_query(query: str, bearer_key: str) -> dict:
 
     t_end = time.perf_counter()
     ttft_ms = (t_first_delta - t_start) * 1000 if t_first_delta else None
+    rag_ms = (t_rag - t_start) * 1000 if t_rag else None
     total_ms = (t_end - t_start) * 1000
 
     return {
         "query": query[:60],
+        "rag_ms": round(rag_ms, 1) if rag_ms else None,
         "ttft_ms": round(ttft_ms, 1) if ttft_ms else None,
         "total_ms": round(total_ms, 1),
         "mode": mode,
@@ -119,7 +126,9 @@ def main():
     # Warm-up: first query (cold start)
     print("--- Warm-up query (absorbs cold-start costs) ---")
     warmup = profile_query("warm up query", bearer_key)
-    print(f"  TTFT={warmup['ttft_ms']}ms  total={warmup['total_ms']}ms  mode={warmup['mode']}")
+    print(
+        f"  RAG={warmup['rag_ms']}ms  TTFT={warmup['ttft_ms']}ms  total={warmup['total_ms']}ms  mode={warmup['mode']}"
+    )
     print()
 
     results = []
@@ -128,7 +137,10 @@ def main():
         print(f"\n[{i}/{len(QUERIES)}] {q[:60]}...")
         r = profile_query(q, bearer_key)
         results.append(r)
-        print(f"  TTFT={r['ttft_ms']}ms  total={r['total_ms']}ms  mode={r['mode']}  deltas={r['delta_count']}")
+        print(
+            f"  RAG={r['rag_ms']}ms  TTFT={r['ttft_ms']}ms  total={r['total_ms']}ms  "
+            f"mode={r['mode']}  deltas={r['delta_count']}"
+        )
         print(f"  Preview: {r['answer_preview']}")
 
     print("\n" + "=" * 80)

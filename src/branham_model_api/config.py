@@ -90,6 +90,11 @@ class LLMProviderSettings:
     key_prefix: str = "DEEPSEEK_API_KEY"
     temperature: float = 0.2
     timeout: float = 30.0
+    # Optional multi-provider route configs used when provider == "mixed".
+    # Example:
+    #   {"deepseek": {"model": "...", "base_url": "...", "key_prefix": "DEEPSEEK_API_KEY"},
+    #    "openrouter": {"model": "...", "base_url": "...", "key_prefix": "OPENROUTER_API_KEY"}}
+    routes: dict[str, dict[str, str | None]] = field(default_factory=dict)
 
     @property
     def effective_model(self) -> str:
@@ -158,6 +163,20 @@ class AppConfig:
         providers_raw = llm_raw.get("providers", {})
         provider_cfg = providers_raw.get(active_provider, {})
 
+        routes: dict[str, dict[str, str | None]] = {}
+        if str(active_provider).strip().lower() == "mixed":
+            # Mixed mode: use DeepSeek direct + OpenRouter (DeepSeek) together.
+            # Key distribution is driven by which env keys are present (4 deepseek + 1 openrouter).
+            for rid in ("deepseek", "openrouter"):
+                cfg = providers_raw.get(rid, {}) or {}
+                routes[rid] = {
+                    "model": cfg.get("model"),
+                    "base_url": cfg.get("base_url"),
+                    "key_prefix": cfg.get("key_prefix"),
+                }
+            # For backwards-compatible fields, prefer deepseek route as the "primary".
+            provider_cfg = providers_raw.get("deepseek", {}) or {}
+
         llm_settings = LLMProviderSettings(
             provider=active_provider,
             model=provider_cfg.get("model", "deepseek/deepseek-chat"),
@@ -165,6 +184,7 @@ class AppConfig:
             key_prefix=provider_cfg.get("key_prefix", "DEEPSEEK_API_KEY"),
             temperature=float(llm_raw.get("temperature", 0.2)),
             timeout=float(llm_raw.get("timeout", 30.0)),
+            routes=routes,
         )
 
         models = ModelSettings(

@@ -92,7 +92,22 @@ class _RefusalRuntime:
     tool_registry = _FakeToolRegistry()
 
     def retrieve(self, retrieval_query: str, **kw):
-        return SimpleNamespace(should_refuse=True, expanded_sermons=[])
+        return SimpleNamespace(
+            should_refuse=True,
+            refuse_reason="no hits",
+            expanded_sermons=[],
+            bm25_hit_count=0,
+            dense_hit_count=0,
+            fused_hit_count=0,
+            total_chunks=0,
+            reranker_triggered=False,
+            signals=SimpleNamespace(
+                dense_score_std=0.0,
+                dense_top_score=0.0,
+                bm25_dense_overlap=0,
+                quote_intent=False,
+            ),
+        )
 
 
 class _AnswerRuntime:
@@ -103,7 +118,22 @@ class _AnswerRuntime:
         self.tool_registry = _FakeToolRegistry()
 
     def retrieve(self, retrieval_query: str, **kw):
-        return SimpleNamespace(should_refuse=False, expanded_sermons=[])
+        return SimpleNamespace(
+            should_refuse=False,
+            refuse_reason=None,
+            expanded_sermons=[],
+            bm25_hit_count=25,
+            dense_hit_count=25,
+            fused_hit_count=40,
+            total_chunks=0,
+            reranker_triggered=False,
+            signals=SimpleNamespace(
+                dense_score_std=0.02,
+                dense_top_score=0.7,
+                bm25_dense_overlap=2,
+                quote_intent=False,
+            ),
+        )
 
     def summarize_conversation(self, *, query, answer, prior_summary, mode):
         return "short summary"
@@ -117,7 +147,22 @@ class _UnavailableRuntime:
         self.tool_registry = _FakeToolRegistry()
 
     def retrieve(self, retrieval_query: str, **kw):
-        return SimpleNamespace(should_refuse=False, expanded_sermons=[])
+        return SimpleNamespace(
+            should_refuse=False,
+            refuse_reason=None,
+            expanded_sermons=[],
+            bm25_hit_count=25,
+            dense_hit_count=25,
+            fused_hit_count=40,
+            total_chunks=0,
+            reranker_triggered=False,
+            signals=SimpleNamespace(
+                dense_score_std=0.02,
+                dense_top_score=0.7,
+                bm25_dense_overlap=2,
+                quote_intent=False,
+            ),
+        )
 
 
 class _ErrorRuntime:
@@ -136,7 +181,22 @@ class _BibleExceptionRuntime:
         self.tool_registry = _FakeToolRegistry()
 
     def retrieve(self, retrieval_query: str, **kw):
-        return SimpleNamespace(should_refuse=True, expanded_sermons=[])
+        return SimpleNamespace(
+            should_refuse=True,
+            refuse_reason="weak",
+            expanded_sermons=[],
+            bm25_hit_count=0,
+            dense_hit_count=0,
+            fused_hit_count=0,
+            total_chunks=0,
+            reranker_triggered=False,
+            signals=SimpleNamespace(
+                dense_score_std=0.0,
+                dense_top_score=0.0,
+                bm25_dense_overlap=0,
+                quote_intent=False,
+            ),
+        )
 
 
 class _ComparisonExceptionRuntime:
@@ -147,7 +207,22 @@ class _ComparisonExceptionRuntime:
         self.tool_registry = _FakeToolRegistry()
 
     def retrieve(self, retrieval_query: str, **kw):
-        return SimpleNamespace(should_refuse=True, expanded_sermons=[])
+        return SimpleNamespace(
+            should_refuse=True,
+            refuse_reason="weak",
+            expanded_sermons=[],
+            bm25_hit_count=0,
+            dense_hit_count=0,
+            fused_hit_count=0,
+            total_chunks=0,
+            reranker_triggered=False,
+            signals=SimpleNamespace(
+                dense_score_std=0.0,
+                dense_top_score=0.0,
+                bm25_dense_overlap=0,
+                quote_intent=False,
+            ),
+        )
 
 
 class _ExternalRuntime:
@@ -160,7 +235,22 @@ class _ExternalRuntime:
         self.tool_registry = _FakeExternalToolRegistry()
 
     def retrieve(self, retrieval_query: str, **kw):
-        return SimpleNamespace(should_refuse=False, expanded_sermons=[])
+        return SimpleNamespace(
+            should_refuse=False,
+            refuse_reason=None,
+            expanded_sermons=[],
+            bm25_hit_count=25,
+            dense_hit_count=25,
+            fused_hit_count=40,
+            total_chunks=0,
+            reranker_triggered=False,
+            signals=SimpleNamespace(
+                dense_score_std=0.02,
+                dense_top_score=0.7,
+                bm25_dense_overlap=2,
+                quote_intent=False,
+            ),
+        )
 
 
 class _FakeExternalToolRegistry(_FakeToolRegistry):
@@ -182,7 +272,22 @@ class _StreamAnswerRuntime:
         self.tool_registry = _FakeToolRegistry()
 
     def retrieve(self, retrieval_query: str, **kw):
-        return SimpleNamespace(should_refuse=False, expanded_sermons=[])
+        return SimpleNamespace(
+            should_refuse=False,
+            refuse_reason=None,
+            expanded_sermons=[],
+            bm25_hit_count=25,
+            dense_hit_count=25,
+            fused_hit_count=40,
+            total_chunks=0,
+            reranker_triggered=False,
+            signals=SimpleNamespace(
+                dense_score_std=0.02,
+                dense_top_score=0.7,
+                bm25_dense_overlap=2,
+                quote_intent=False,
+            ),
+        )
 
 
 class _StreamRefusalRuntime:
@@ -196,7 +301,22 @@ class _StreamRefusalRuntime:
         self.tool_registry = _FakeToolRegistry()
 
     def retrieve(self, retrieval_query: str, **kw):
-        return SimpleNamespace(should_refuse=False, expanded_sermons=[])
+        return SimpleNamespace(
+            should_refuse=False,
+            refuse_reason=None,
+            expanded_sermons=[],
+            bm25_hit_count=25,
+            dense_hit_count=25,
+            fused_hit_count=40,
+            total_chunks=0,
+            reranker_triggered=False,
+            signals=SimpleNamespace(
+                dense_score_std=0.02,
+                dense_top_score=0.7,
+                bm25_dense_overlap=2,
+                quote_intent=False,
+            ),
+        )
 
 
 class _SummaryRuntime:
@@ -207,7 +327,22 @@ class _SummaryRuntime:
         self.tool_registry = _FakeToolRegistry()
 
     def retrieve(self, retrieval_query: str, **kw):
-        return SimpleNamespace(should_refuse=False, expanded_sermons=[])
+        return SimpleNamespace(
+            should_refuse=False,
+            refuse_reason=None,
+            expanded_sermons=[],
+            bm25_hit_count=25,
+            dense_hit_count=25,
+            fused_hit_count=40,
+            total_chunks=0,
+            reranker_triggered=False,
+            signals=SimpleNamespace(
+                dense_score_std=0.02,
+                dense_top_score=0.7,
+                bm25_dense_overlap=2,
+                quote_intent=False,
+            ),
+        )
 
     def summarize_conversation(self, *, query, answer, prior_summary, mode):
         assert mode == "answer"
@@ -240,7 +375,22 @@ class _BibleFallbackRuntime:
         self.tool_registry = _FakeToolRegistry()
 
     def retrieve(self, retrieval_query: str, **kw):
-        return SimpleNamespace(should_refuse=False, expanded_sermons=[])
+        return SimpleNamespace(
+            should_refuse=False,
+            refuse_reason=None,
+            expanded_sermons=[],
+            bm25_hit_count=25,
+            dense_hit_count=25,
+            fused_hit_count=40,
+            total_chunks=0,
+            reranker_triggered=False,
+            signals=SimpleNamespace(
+                dense_score_std=0.02,
+                dense_top_score=0.7,
+                bm25_dense_overlap=2,
+                quote_intent=False,
+            ),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -261,6 +411,7 @@ def test_chat_sse_streams_early_refusal(monkeypatch):
     events = _parse_sse(resp.text)
     names = [n for n, _ in events]
     assert names[0] == "start"
+    # For early retrieval refusals we do not emit a rag payload.
     assert "delta" in names
     assert "final" in names
     final = [p for n, p in events if n == "final"][-1]
@@ -280,6 +431,9 @@ def test_chat_sse_streams_answer_flow(monkeypatch):
     )
     assert resp.status_code == 200
     events = _parse_sse(resp.text)
+    names = [n for n, _ in events]
+    assert names[0] == "start"
+    assert "rag" in names
     final = [p for n, p in events if n == "final"][-1]
     assert final["mode"] == "answer"
     assert "[47-0412M: ¶2–¶3]" in final["answer"]

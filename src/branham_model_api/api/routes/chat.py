@@ -40,9 +40,12 @@ from branham_model_api.core.tools.registry import ToolLimitError
 from branham_model_api.generation import (
     LiteLLMClient,
     LiteLLMClientConfig,
+    LiteLLMMixedClient,
+    LiteLLMRouteConfig,
     LiteLLMRateLimitError,
     LiteLLMServiceUnavailableError,
     LLMKeyManager,
+    MixedLLMKeyManager,
 )
 from branham_model_api.retrieval.dense import DenseEmbedder, EmbedderConfig
 from branham_model_api.retrieval.reranker import Reranker, RerankerConfig
@@ -199,6 +202,12 @@ class ChatRuntime:
     def __init__(self) -> None:
         cfg = get_config()
 
+        # Enforce offline-only HF loads when requested.
+        #
+        # This prevents any network calls to Hugging Face during local testing/dev
+        # (will fail fast if the model is not present in cache).
+        offline = os.getenv("HF_OFFLINE_ONLY", "").strip().lower() in {"1", "true", "yes"}
+
         embedder = DenseEmbedder(
             EmbedderConfig(
                 model_id=cfg.models.embedding_model_id,
@@ -207,6 +216,7 @@ class ChatRuntime:
                     "Given a question about William Branham's teachings or sermons, "
                     "retrieve relevant sermon passages that answer the query"
                 ),
+                local_files_only=offline,
             )
         )
 
@@ -214,7 +224,10 @@ class ChatRuntime:
         reranker = None
         if retrieval_config.reranker_mode != "never":
             reranker = Reranker(
-                RerankerConfig(model_id=cfg.models.reranker_model_id)
+                RerankerConfig(
+                    model_id=cfg.models.reranker_model_id,
+                    local_files_only=offline,
+                )
             )
 
         self.pipeline: RAGPipeline = create_rag_pipeline(
@@ -228,23 +241,47 @@ class ChatRuntime:
         )
 
         llm_cfg = cfg.models.llm
-        key_mgr = LLMKeyManager(key_prefix=llm_cfg.key_prefix)
-        self.llm_client = LiteLLMClient(
-            config=LiteLLMClientConfig(
-                model=llm_cfg.effective_model,
-                base_url=llm_cfg.base_url,
+        provider = (llm_cfg.provider or "").strip().lower()
+        if provider == "mixed":
+            routes = {}
+            prefixes = {}
+            for rid, rcfg in (llm_cfg.routes or {}).items():
+                model = str(rcfg.get("model") or "").strip()
+                base_url = str(rcfg.get("base_url") or "").strip() or None
+                key_prefix = str(rcfg.get("key_prefix") or "").strip()
+                if model and key_prefix:
+                    routes[rid] = LiteLLMRouteConfig(model=model, base_url=base_url)
+                    prefixes[rid] = key_prefix
+            key_mgr = MixedLLMKeyManager(route_key_prefixes=prefixes)
+            self.llm_client = LiteLLMMixedClient(
+                routes=routes,
                 timeout=llm_cfg.timeout,
                 temperature=llm_cfg.temperature,
-            ),
-            key_manager=key_mgr,
-        )
-        logger.info(
-            "LLM provider=%s model=%s base_url=%s keys=%d",
-            llm_cfg.provider,
-            llm_cfg.effective_model,
-            llm_cfg.base_url or "(litellm default)",
-            key_mgr.key_count,
-        )
+                key_manager=key_mgr,
+            )
+            logger.info(
+                "LLM provider=mixed routes=%s keys=%d",
+                ",".join(sorted(routes.keys())) or "(none)",
+                key_mgr.key_count,
+            )
+        else:
+            key_mgr = LLMKeyManager(key_prefix=llm_cfg.key_prefix)
+            self.llm_client = LiteLLMClient(
+                config=LiteLLMClientConfig(
+                    model=llm_cfg.effective_model,
+                    base_url=llm_cfg.base_url,
+                    timeout=llm_cfg.timeout,
+                    temperature=llm_cfg.temperature,
+                ),
+                key_manager=key_mgr,
+            )
+            logger.info(
+                "LLM provider=%s model=%s base_url=%s keys=%d",
+                llm_cfg.provider,
+                llm_cfg.effective_model,
+                llm_cfg.base_url or "(litellm default)",
+                key_mgr.key_count,
+            )
         self.tool_registry = create_default_tool_registry(
             chunk_store=self.pipeline.chunk_store
         )
@@ -638,7 +675,6 @@ async def chat(
                 (time.perf_counter() - t_request) * 1000,
             )
             return
-
         retrieval_query = build_retrieval_query(
             request.query,
             request.conversation_summary,
@@ -675,8 +711,34 @@ async def chat(
                 )
                 return
 
-            # ---- Build messages ----
+            # Emit full RAG context as soon as we have it for non-refusal flows.
+            # This allows the frontend to render evidence immediately while the LLM streams.
             rag_context = build_rag_context(retrieval_result.expanded_sermons)
+            yield _sse_event(
+                "rag",
+                {
+                    "retrieval_query": retrieval_query,
+                    "rag_context": rag_context,
+                    "retrieval": {
+                        "should_refuse": retrieval_result.should_refuse,
+                        "refuse_reason": retrieval_result.refuse_reason,
+                        "bm25_hit_count": retrieval_result.bm25_hit_count,
+                        "dense_hit_count": retrieval_result.dense_hit_count,
+                        "fused_hit_count": retrieval_result.fused_hit_count,
+                        "sermon_count": len(retrieval_result.expanded_sermons),
+                        "total_chunks": retrieval_result.total_chunks,
+                        "reranker_triggered": retrieval_result.reranker_triggered,
+                        "signals": {
+                            "dense_score_std": retrieval_result.signals.dense_score_std,
+                            "dense_top_score": retrieval_result.signals.dense_top_score,
+                            "bm25_dense_overlap": retrieval_result.signals.bm25_dense_overlap,
+                            "quote_intent": retrieval_result.signals.quote_intent,
+                        },
+                    },
+                },
+            )
+
+            # ---- Build messages ----
             system_prompt = build_system_prompt(
                 refusal_message=_get_fixed_refusal_message(),
                 extra_instructions=_query_mode_prompt_addendum(request.query),

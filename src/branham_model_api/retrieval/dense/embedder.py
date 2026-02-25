@@ -104,6 +104,32 @@ class DenseEmbedder:
         self.device = get_device(cfg.device_preference)
         self.dtype = get_dtype(cfg.dtype)
 
+        # When running in offline mode, resolve repo ids to a local snapshot path.
+        #
+        # This avoids Hugging Face Hub metadata calls that some tokenizer helpers
+        # may attempt even when local_files_only=True.
+        model_ref: str = cfg.model_id
+        if cfg.local_files_only:
+            # If model_id looks like a repo id (org/name) and not a local directory, snap to cache.
+            import os
+            from pathlib import Path
+
+            if "/" in cfg.model_id and not Path(cfg.model_id).exists():
+                try:
+                    from huggingface_hub import snapshot_download
+
+                    model_ref = snapshot_download(
+                        repo_id=cfg.model_id,
+                        local_files_only=True,
+                        cache_dir=cfg.cache_dir,
+                    )
+                except Exception as e:
+                    raise RuntimeError(
+                        f"Offline-only load failed for embedding model {cfg.model_id!r}. "
+                        f"Ensure it is already present in the local HF cache (HF_HOME={os.getenv('HF_HOME','')!r}). "
+                        f"Original error: {e}"
+                    ) from e
+
         # Determine padding side: explicit config > model-based inference > default "right"
         padding_side = cfg.padding_side
         if padding_side is None and cfg.pooling == "last_token":
@@ -111,7 +137,7 @@ class DenseEmbedder:
             padding_side = "left"
 
         self.tokenizer = AutoTokenizer.from_pretrained(
-            cfg.model_id,
+            model_ref,
             trust_remote_code=cfg.trust_remote_code,
             local_files_only=bool(cfg.local_files_only),
             cache_dir=cfg.cache_dir,
@@ -121,7 +147,7 @@ class DenseEmbedder:
         # PyTorch path
         try:
             self.model = AutoModel.from_pretrained(
-                cfg.model_id,
+                model_ref,
                 trust_remote_code=cfg.trust_remote_code,
                 local_files_only=bool(cfg.local_files_only),
                 cache_dir=cfg.cache_dir,

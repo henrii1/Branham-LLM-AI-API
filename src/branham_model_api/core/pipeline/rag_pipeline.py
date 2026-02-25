@@ -451,9 +451,13 @@ class RAGPipeline:
         elif config.language_detection_mode == "auto":
             query_lang = detect_query_language(query_normalized, use_langid=True)
         else:
-            # mode=never and no FE language -> skip BM25 (safe default: dense-only)
-            query_lang = "unknown"
-            logger.debug("langid disabled (mode=never) and no user_language; BM25 will be skipped")
+            # English-only V1: if we got here, the API boundary already allowed the query.
+            # With language_detection.mode=never we intentionally avoid langid overhead, and we
+            # still run BM25 (hybrid retrieval) on the assumption the query is English.
+            query_lang = "en"
+            logger.debug(
+                "langid disabled (mode=never) and no user_language; assuming English and running BM25"
+            )
 
         logger.debug(f"Query normalized, quote_intent={quote_intent}, lang={query_lang}")
 
@@ -563,29 +567,32 @@ class RAGPipeline:
                 config.min_dense_score,
             )
 
-        # 8. Expand chunks ±1 (only if not refusing)
+        # 8. Expand chunks (always produce a context payload)
+        #
+        # Even when refusing, we still return the deduped retrieved context
+        # (delta=0) so the caller can surface what was retrieved for UX/debug.
         expanded_sermons: list[ExpandedSermon] = []
         total_chunks = 0
 
-        if not should_refuse:
-            # Get all chunks from selected sermons
-            all_sermon_chunks: list[FusedHit] = []
-            for group in sermon_groups:
-                all_sermon_chunks.extend(group.chunks)
+        # Get all chunks from selected sermons
+        all_sermon_chunks: list[FusedHit] = []
+        for group in sermon_groups:
+            all_sermon_chunks.extend(group.chunks)
 
-            # Preserve sermon order from collation (ranked by composite score)
-            sermon_order = [g.date_id for g in sermon_groups]
+        # Preserve sermon order from collation (ranked by composite score)
+        sermon_order = [g.date_id for g in sermon_groups]
 
-            # Expand
-            expanded_sermons = expand_and_group(
-                all_sermon_chunks,
-                self.chunk_store,
-                delta=config.expansion_delta,
-                sermon_order=sermon_order,  # Preserve composite score ranking
-            )
+        # Expand: on refusal, keep delta=0 (retrieved-only) to minimize extra IO.
+        delta = 0 if should_refuse else config.expansion_delta
+        expanded_sermons = expand_and_group(
+            all_sermon_chunks,
+            self.chunk_store,
+            delta=delta,
+            sermon_order=sermon_order,  # Preserve composite score ranking
+        )
 
-            # Count total chunks
-            total_chunks = sum(len(s.chunks) for s in expanded_sermons)
+        # Count total chunks
+        total_chunks = sum(len(s.chunks) for s in expanded_sermons)
 
         total_elapsed = (time.perf_counter() - total_start) * 1000
         

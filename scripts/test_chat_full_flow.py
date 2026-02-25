@@ -28,9 +28,14 @@ from branham_model_api.api.routes.chat import (  # noqa: E402
     _is_english_request,
     _maybe_override_refusal_for_allowed_query,
     _normalize_english_only_reply,
+    _query_mode_prompt_addendum,
     get_chat_runtime,
 )
-from branham_model_api.core.pipeline import finalize_answer, is_bible_query  # noqa: E402
+from branham_model_api.core.pipeline import (  # noqa: E402
+    finalize_answer,
+    is_bible_query,
+    is_comparison_query,
+)
 from branham_model_api.core.prompts import (  # noqa: E402
     build_chat_messages,
     build_rag_context,
@@ -253,7 +258,6 @@ def main() -> None:
             }
             _dump_markdown_and_logs(run_report, logger)
             return
-
         retrieval_result = runtime.retrieve(
             retrieval_query,
             user_language=request.user_language,
@@ -273,7 +277,9 @@ def main() -> None:
             },
         }
 
-        if retrieval_result.should_refuse and not is_bible_query(request.query):
+        if retrieval_result.should_refuse and not (
+            is_bible_query(request.query) or is_comparison_query(request.query)
+        ):
             refusal = _get_fixed_refusal_message()
             run_report["final"] = {
                 "mode": "refusal",
@@ -289,7 +295,10 @@ def main() -> None:
         _dump_text(LATEST_RAG_CONTEXT, rag_context)
         logger.debug("RAG context written: %s", LATEST_RAG_CONTEXT.resolve())
 
-        system_prompt = build_system_prompt(refusal_message=_get_fixed_refusal_message())
+        system_prompt = build_system_prompt(
+            refusal_message=_get_fixed_refusal_message(),
+            extra_instructions=_query_mode_prompt_addendum(request.query),
+        )
         llm_messages = build_chat_messages(
             system_prompt=system_prompt,
             query=request.query,

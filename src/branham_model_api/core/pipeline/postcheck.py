@@ -75,7 +75,7 @@ _COMPARISON_KEYWORDS = (
 UNVERIFIED_SECTION_HEADER = "## Unverified / External Information"
 _NON_COMPLIANT_REFUSAL_PATTERNS = (
     "provided rag context",
-    "provided sermon context does not contain",
+    "provided sermon context",
     "current sermon context i have",
     "cannot answer your question based on",
     "if you'd like, i can search",
@@ -186,6 +186,36 @@ def _is_non_compliant_refusal_style(answer: str) -> bool:
     return any(pat in text for pat in _NON_COMPLIANT_REFUSAL_PATTERNS)
 
 
+def _strip_internal_mechanics_language(answer: str) -> tuple[str, bool]:
+    """
+    Remove user-visible internal pipeline wording (RAG/retrieval context talk).
+
+    We keep this lightweight and conservative: only remove explicit mechanics
+    phrases that should never appear in final user-facing text.
+    """
+    text = answer or ""
+    original = text
+    patterns = (
+        r"(?im)^[^\n]*\bprovided\s+rag\s+context\b[^\n]*\n?",
+        r"(?im)^[^\n]*\bprovided\s+sermon\s+context\b[^\n]*\n?",
+        r"(?im)^[^\n]*\bcurrent\s+sermon\s+context\b[^\n]*\n?",
+        r"(?im)^[^\n]*\bretrieval\s+pipeline\b[^\n]*\n?",
+        r"(?im)^[^\n]*\btool\s+loop\b[^\n]*\n?",
+    )
+    for pat in patterns:
+        text = re.sub(pat, "", text)
+    # If phrase appears inline inside a sentence, scrub only the phrase.
+    inline_patterns = (
+        r"(?i)\bprovided\s+rag\s+context\b",
+        r"(?i)\bprovided\s+sermon\s+context\b",
+        r"(?i)\bcurrent\s+sermon\s+context\b",
+    )
+    for pat in inline_patterns:
+        text = re.sub(pat, "available evidence", text)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text, (text != original)
+
+
 @dataclass
 class PostcheckResult:
     mode: str
@@ -209,10 +239,14 @@ def finalize_answer(
     """
     _ = query  # kept for signature stability
     text = (answer or "").strip()
+    text, removed_internal_language = _strip_internal_mechanics_language(text)
 
     # Normalize model-produced refusal variants to the fixed refusal contract.
     if not external_info:
-        if text == refusal_message:
+        normalized_for_refusal_check = text
+        if normalized_for_refusal_check.lower().startswith("answer:"):
+            normalized_for_refusal_check = normalized_for_refusal_check[7:].strip()
+        if normalized_for_refusal_check == refusal_message:
             return PostcheckResult(
                 mode="refusal",
                 answer=refusal_message,
@@ -241,6 +275,6 @@ def finalize_answer(
         mode="answer",
         answer=text,
         external_info=external_info,
-        issues=[],
+        issues=(["removed_internal_mechanics_language"] if removed_internal_language else []),
     )
 

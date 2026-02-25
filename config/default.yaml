@@ -36,7 +36,7 @@ models:
 # Each provider has its own model name, base_url, and key_prefix.
 # Keys follow the pattern: {key_prefix}_A .. {key_prefix}_E
 llm:
-  provider: openrouter  # "openrouter" or "deepseek"
+  provider: mixed  # "mixed" (default), "openrouter", or "deepseek"
   temperature: 0.2
   timeout: 30.0
   providers:

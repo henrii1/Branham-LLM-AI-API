@@ -21,14 +21,14 @@ def create_default_tool_registry(
     """
     Build tool registry with project call limits.
 
-    System prompt enforces a hard ceiling of 3 total tool calls.
-    Code is lenient at 4 to allow for edge cases.
+    Total budget is enforced per tool-loop "round" (one assistant tool-call turn),
+    not per individual tool call. This matches the latency/loop structure.
 
     Per-tool hard limits:
       - db_search: 3  (system prompt pushes batching → usually 1 call)
       - biography_search: 2  (system prompt targets 1)
       - internet_search: 2  (system prompt targets 1)
-      - total tools: 4 code / 3 system prompt
+      - total rounds: 4 code / 3 system prompt target (soft)
 
     When limits are reached, ToolLimitError tells the LLM to answer
     with what it already has.
@@ -40,4 +40,12 @@ def create_default_tool_registry(
             ToolSpec(tool=SerperTool(), max_calls=2),
         ],
         max_total_calls=4,
+        # Soft limits: align with the system prompt's "prefer" guidance.
+        # These do NOT block; they annotate tool outputs with `_soft_limits` when exceeded.
+        soft_max_total_calls=3,
+        soft_max_calls={
+            "db_search": 2,
+            "biography_search": 1,
+            "internet_search": 1,
+        },
     )

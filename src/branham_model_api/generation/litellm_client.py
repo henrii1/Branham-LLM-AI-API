@@ -39,6 +39,15 @@ class LiteLLMClientConfig:
     base_url: str | None = None
     timeout: float = 30.0
     temperature: float = 0.2
+    reasoning: dict[str, Any] | None = None
+
+
+def _looks_like_openrouter_route(*, model: str, base_url: str | None) -> bool:
+    if str(model or "").strip().lower().startswith("openrouter/"):
+        return True
+    if base_url and "openrouter.ai" in str(base_url).lower():
+        return True
+    return False
 
 
 def _is_rate_limit_error(exc: Exception) -> bool:
@@ -153,10 +162,15 @@ class LiteLLMClient:
         }
         if self.config.base_url:
             kwargs["base_url"] = self.config.base_url
+        if (
+            self.config.reasoning
+            and _looks_like_openrouter_route(model=self.config.model, base_url=self.config.base_url)
+        ):
+            kwargs["reasoning"] = self.config.reasoning
         if tools is not None:
             kwargs["tools"] = tools
-        if tool_choice is not None:
-            kwargs["tool_choice"] = tool_choice
+            if tool_choice is not None:
+                kwargs["tool_choice"] = tool_choice
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens
         return litellm.completion(**kwargs)
@@ -261,10 +275,15 @@ class LiteLLMClient:
         }
         if self.config.base_url:
             kwargs["base_url"] = self.config.base_url
+        if (
+            self.config.reasoning
+            and _looks_like_openrouter_route(model=self.config.model, base_url=self.config.base_url)
+        ):
+            kwargs["reasoning"] = self.config.reasoning
         if tools is not None:
             kwargs["tools"] = tools
-        if tool_choice is not None:
-            kwargs["tool_choice"] = tool_choice
+            if tool_choice is not None:
+                kwargs["tool_choice"] = tool_choice
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens
         return litellm.completion(**kwargs)
@@ -405,8 +424,8 @@ class LiteLLMMixedClient:
             kwargs["base_url"] = route.base_url
         if tools is not None:
             kwargs["tools"] = tools
-        if tool_choice is not None:
-            kwargs["tool_choice"] = tool_choice
+            if tool_choice is not None:
+                kwargs["tool_choice"] = tool_choice
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens
         return litellm.completion(**kwargs)

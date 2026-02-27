@@ -10,6 +10,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from typing import Any
 
 import yaml
 
@@ -90,6 +91,9 @@ class LLMProviderSettings:
     key_prefix: str = "DEEPSEEK_API_KEY"
     temperature: float = 0.2
     timeout: float = 30.0
+    # Optional provider-agnostic reasoning config (OpenRouter-normalized shape).
+    # Example: {"effort": "none", "exclude": True}
+    reasoning: dict[str, Any] | None = None
     # Optional multi-provider route configs used when provider == "mixed".
     # Example:
     #   {"deepseek": {"model": "...", "base_url": "...", "key_prefix": "DEEPSEEK_API_KEY"},
@@ -160,6 +164,13 @@ class AppConfig:
         # Parse LLM provider config
         llm_raw = raw.get("llm", {})
         active_provider = llm_raw.get("provider", "deepseek")
+        # Allow quick overrides for experiments/benchmarks without editing YAML.
+        # Examples:
+        #   LLM_PROVIDER=openrouter
+        #   LLM_PROVIDER=mixed
+        env_provider = os.getenv("LLM_PROVIDER", "").strip()
+        if env_provider:
+            active_provider = env_provider
         providers_raw = llm_raw.get("providers", {})
         provider_cfg = providers_raw.get(active_provider, {})
 
@@ -184,6 +195,7 @@ class AppConfig:
             key_prefix=provider_cfg.get("key_prefix", "DEEPSEEK_API_KEY"),
             temperature=float(llm_raw.get("temperature", 0.2)),
             timeout=float(llm_raw.get("timeout", 30.0)),
+            reasoning=(llm_raw.get("reasoning") if isinstance(llm_raw.get("reasoning"), dict) else None),
             routes=routes,
         )
 

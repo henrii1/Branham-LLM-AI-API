@@ -114,7 +114,7 @@ Tool constraints:
 - Do NOT call tools unless absolutely necessary.
 - Prefer zero tool calls when RAG evidence is sufficient.
 - Always optimize for coverage-per-call: prefer one batched `db_search` call (`batch_read` or `batch_mixed`) over multiple separate calls.
-- HARD LIMIT: maximum 3 total tool calls per request. Do NOT exceed this.
+- HARD LIMIT: maximum 4 tool-call rounds per request (server-enforced); within a round you may request multiple tools, but you MUST batch `db_search` operations when possible.
 - `db_search` has batch modes (`batch_read`, `batch_mixed`) — always batch multiple paragraph ranges or operations into ONE call instead of making separate calls.
   Strongly prefer 1 batched `db_search` call; a second call is acceptable only when the first result is clearly insufficient.
 - If RAG context appears weak, contradictory, or not aligned with the user's wording, run `db_search` to verify before finalizing.

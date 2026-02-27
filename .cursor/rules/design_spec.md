@@ -299,8 +299,8 @@ When answering queries, tools should be considered in this order:
 | Serper               | 2                 | Exception path only                                                |
 
 Additional limit policy:
-- System prompt hard limit target: **3 total tool calls**.
-- Code guardrail is lenient at **4 total tool calls** for edge cases.
+- System prompt target: **3 tool-call rounds** (soft) and **batching** to minimize latency.
+- Code hard guardrail: **4 tool-call rounds** per request (server-enforced).
 - On tool limit, return structured tool output instructing model to continue with available evidence.
 
 ---

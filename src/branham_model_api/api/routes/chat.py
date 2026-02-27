@@ -9,6 +9,7 @@ Streaming-first architecture:
 """
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
 import os
@@ -272,6 +273,7 @@ class ChatRuntime:
                     base_url=llm_cfg.base_url,
                     timeout=llm_cfg.timeout,
                     temperature=llm_cfg.temperature,
+                    reasoning=llm_cfg.reasoning,
                 ),
                 key_manager=key_mgr,
             )
@@ -437,6 +439,63 @@ def _extract_delta_tool_calls(chunk: Any) -> list[dict[str, Any]] | None:
     except Exception:
         pass
     return None
+
+
+def _maybe_batch_db_search_tool_calls(
+    *,
+    tool_registry: Any,
+    tool_calls: list[dict[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], bool]:
+    """
+    If multiple db_search tool calls are requested in the same streamed assistant turn,
+    execute them as one batch_mixed call (counts once), then return per-tool_call_id
+    outputs to feed back to the model.
+
+    Returns (tool_call_id -> output, did_batch).
+    """
+    db_calls: list[tuple[str, dict[str, Any]]] = []
+    for c in tool_calls:
+        fn = (c or {}).get("function") or {}
+        if fn.get("name") != "db_search":
+            continue
+        tcid = c.get("id") or ""
+        raw_args = fn.get("arguments", "{}")
+        try:
+            parsed_args = json.loads(raw_args) if raw_args else {}
+        except json.JSONDecodeError:
+            parsed_args = {}
+        db_calls.append((tcid, parsed_args))
+
+    if len(db_calls) <= 1:
+        return ({}, False)
+
+    operations = [args for _, args in db_calls]
+    try:
+        batch = tool_registry.execute_tool(
+            "db_search",
+            {"mode": "batch_mixed", "operations": operations},
+        )
+    except ToolLimitError:
+        return ({}, False)
+
+    results = []
+    if isinstance(batch, dict) and batch.get("ok") and batch.get("mode") == "batch_mixed":
+        results = batch.get("results") or []
+
+    out: dict[str, dict[str, Any]] = {}
+    for i, (tcid, args) in enumerate(db_calls):
+        if not tcid:
+            continue
+        result_i = results[i] if i < len(results) else {"ok": False, "error": "Missing batched result."}
+        out[tcid] = {
+            "ok": True,
+            "batched": True,
+            "batch_mode": "batch_mixed",
+            "original_tool": "db_search",
+            "original_mode": (args.get("mode") if isinstance(args, dict) else None),
+            "result": result_i,
+        }
+    return (out, True)
 
 
 @dataclass
@@ -805,18 +864,12 @@ async def chat(
                         }
                         working_messages.append(assistant_msg)
 
-                        for c in buffered.tool_calls:
-                            tool_name = c["function"]["name"]
-                            raw_args = c["function"].get("arguments", "{}")
-                            try:
-                                parsed_args = json.loads(raw_args) if raw_args else {}
-                            except json.JSONDecodeError:
-                                parsed_args = {}
-                            try:
-                                output = runtime.tool_registry.execute_tool(
-                                    tool_name, parsed_args
-                                )
-                            except ToolLimitError as exc:
+                        # Begin a single tool-call "round" (counts once for total budget).
+                        try:
+                            runtime.tool_registry.begin_tool_round()
+                        except ToolLimitError as exc:
+                            for c in buffered.tool_calls:
+                                tool_name = c["function"]["name"]
                                 output = runtime.tool_registry.limit_reached_output(
                                     tool_name=tool_name,
                                     error=str(exc),
@@ -827,13 +880,101 @@ async def chat(
                                     "has_rag_context": bool(rag_context.strip()),
                                     "prior_tool_outputs_count": len(tool_outputs_all),
                                 }
+                                tool_outputs_all.append({"name": tool_name, "output": output})
+                                working_messages.append(
+                                    {
+                                        "role": "tool",
+                                        "tool_call_id": c["id"],
+                                        "name": tool_name,
+                                        "content": json.dumps(output, ensure_ascii=True),
+                                    }
+                                )
+                            if runtime.tool_registry.total_exhausted:
+                                tools_exhausted = True
+                            continue  # next iteration
+
+                        batched_db_outputs, did_batch_db = _maybe_batch_db_search_tool_calls(
+                            tool_registry=runtime.tool_registry,
+                            tool_calls=buffered.tool_calls,
+                        )
+
+                        # Reserve counts synchronously, execute tools in parallel.
+                        tasks: list[tuple[dict[str, Any], str, tuple[Any, dict[str, Any], list[dict[str, Any]]] | None, dict[str, Any] | None]] = []
+                        # Each entry: (tool_call, tool_name, prepared(spec,args,soft), immediate_output)
+                        for c in buffered.tool_calls:
+                            tool_name = c["function"]["name"]
+                            raw_args = c["function"].get("arguments", "{}")
+                            try:
+                                parsed_args = json.loads(raw_args) if raw_args else {}
+                            except json.JSONDecodeError:
+                                parsed_args = {}
+
+                            tcid = c.get("id") or ""
+                            if did_batch_db and tool_name == "db_search":
+                                if tcid and tcid in batched_db_outputs:
+                                    tasks.append((c, tool_name, None, batched_db_outputs[tcid]))
+                                continue
+
+                            try:
+                                prepared = runtime.tool_registry.prepare_tool_execution(
+                                    tool_name, parsed_args
+                                )
+                                tasks.append((c, tool_name, prepared, None))
+                            except ToolLimitError as exc:
+                                immediate = runtime.tool_registry.limit_reached_output(
+                                    tool_name=tool_name,
+                                    error=str(exc),
+                                )
+                                immediate["context_hints"] = {
+                                    "has_original_query": True,
+                                    "has_history_window": bool(request.history_window),
+                                    "has_rag_context": bool(rag_context.strip()),
+                                    "prior_tool_outputs_count": len(tool_outputs_all),
+                                }
+                                tasks.append((c, tool_name, None, immediate))
+
+                        futures: dict[str, concurrent.futures.Future[dict[str, Any]]] = {}
+                        with concurrent.futures.ThreadPoolExecutor(
+                            max_workers=min(8, max(1, len(tasks)))
+                        ) as ex:
+                            for c, tool_name, prepared, immediate in tasks:
+                                if immediate is not None or prepared is None:
+                                    continue
+                                tcid = c.get("id") or ""
+                                spec, args2, soft_events = prepared
+
+                                def _run(spec=spec, args2=args2, soft_events=soft_events) -> dict[str, Any]:
+                                    try:
+                                        out = spec.tool.execute(args2)
+                                    except Exception as exc:
+                                        out = {"ok": False, "error": f"Tool execution failed: {type(exc).__name__}: {exc}"}
+                                    if soft_events and isinstance(out, dict):
+                                        out["_soft_limits"] = soft_events
+                                    return out
+
+                                if tcid:
+                                    futures[tcid] = ex.submit(_run)
+
+                        # Collect in original order
+                        for c, tool_name, prepared, immediate in tasks:
+                            tcid = c.get("id") or ""
+                            if immediate is not None:
+                                output = immediate
+                            elif tcid and tcid in futures:
+                                try:
+                                    output = futures[tcid].result()
+                                except Exception as exc:
+                                    output = {"ok": False, "error": f"Tool execution failed: {type(exc).__name__}: {exc}"}
+                            else:
+                                continue
+
                             if output.get("external"):
                                 external_used = True
                             tool_outputs_all.append({"name": tool_name, "output": output})
                             working_messages.append(
                                 {
                                     "role": "tool",
-                                    "tool_call_id": c["id"],
+                                    "tool_call_id": tcid,
                                     "name": tool_name,
                                     "content": json.dumps(output, ensure_ascii=True),
                                 }

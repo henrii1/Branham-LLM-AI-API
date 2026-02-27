@@ -36,12 +36,15 @@ models:
 # Each provider has its own model name, base_url, and key_prefix.
 # Keys follow the pattern: {key_prefix}_A .. {key_prefix}_E
 llm:
-  provider: mixed  # "mixed" (default), "openrouter", or "deepseek"
+  provider: openrouter  # "mixed", "openrouter", or "deepseek"
   temperature: 0.2
   timeout: 30.0
+  reasoning:
+    effort: 'none'
+    exclude: true
   providers:
     openrouter:
-      model: openrouter/deepseek/deepseek-chat
+      model: openrouter/x-ai/grok-4.1-fast
       base_url: https://openrouter.ai/api/v1
       key_prefix: OPENROUTER_API_KEY
     deepseek:

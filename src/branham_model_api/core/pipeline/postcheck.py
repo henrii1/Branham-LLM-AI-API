@@ -167,6 +167,25 @@ def _strip_non_sermon_sections(answer: str) -> str:
 
     cleaned = "\n".join(lines).strip()
 
+    # If the model emitted an "Unverified / External Information" header without
+    # using the official external_info channel, collapse it back into Answer
+    # (remove the header label, keep the content).
+    cleaned = re.sub(
+        r"(?im)^\s*(?:#{1,6}\s*)?unverified\s*/\s*external\s*information\s*:?\s*$",
+        "",
+        cleaned,
+    )
+    cleaned = re.sub(
+        r"(?im)^\s*\*{1,2}\s*unverified\s*/\s*external\s*information\s*:?\s*\*{1,2}\s*$",
+        "",
+        cleaned,
+    )
+    cleaned = re.sub(
+        r"(?im)^\s*note:\s*these\s+are\s+unverified\s+external\s+claims.*$",
+        "",
+        cleaned,
+    )
+
     # Remove placeholder References section(s).
     # We only call this helper when there are NO sermon citations at all,
     # so "References" is typically empty/placeholder and should be removed.
@@ -184,6 +203,12 @@ def _strip_non_sermon_sections(answer: str) -> str:
     )
     cleaned = re.sub(
         r"\n*#{0,6}\s*References:\s*\n(?:\s*-\s*(?:\[\]|\-|\[\s*\]|None|\[N/?A\])\s*(?:\n|$))+",
+        "\n",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"\n*#{0,6}\s*References:\s*\n\s*\(none\s+from\s+sermons\.\)\s*(?:\n|$)",
         "\n",
         cleaned,
         flags=re.IGNORECASE,

@@ -197,6 +197,44 @@ def _validate_bearer_auth(authorization: str | None) -> None:
 SERVICE_UNAVAILABLE_MESSAGE = "The service is temporarily unavailable right now. Please try again later."
 
 
+def _should_append_unverified_external_section(query: str) -> bool:
+    """
+    Only force the Unverified/External section when the internet-derived facts are
+    about William/Bro Branham himself. For org/admin questions (VGR, tabernacle),
+    allow external facts to remain in Answer without the external section.
+    """
+    q = f" {(query or '').strip().lower()} "
+    if not q.strip():
+        return False
+
+    # Org/admin queries: do not force the external section.
+    org_signals = (
+        "voice of god recordings",
+        "vgr",
+        "branham tabernacle",
+        "tabernacle",
+        "branham.org",
+        "who runs",
+        "who is running",
+        "leadership",
+        "president",
+        "director",
+        "board",
+    )
+    if any(s in q for s in org_signals):
+        return False
+
+    # William/Bro Branham person-focused queries: force the external section.
+    if "bro branham" in q or "brother branham" in q:
+        return True
+    if "william" in q and "branham" in q:
+        return True
+    if "w. m. branham" in q or "w.m. branham" in q:
+        return True
+
+    return False
+
+
 class ChatRuntime:
     """Holds warm singletons for the retrieval pipeline, LLM client, and tools."""
 
@@ -312,16 +350,21 @@ class ChatRuntime:
         loop_result = self.tool_runner.run(messages)
 
         external_info = None
-        for output in loop_result.tool_outputs:
-            if output.get("name") == "internet_search":
-                payload = output.get("output", {})
-                external_info = {
-                    "disclaimer": payload.get(
-                        "disclaimer", "Unverified external search results."
-                    ),
-                    "sources": [s.get("url") for s in payload.get("sources", []) if s.get("url")],
-                }
-                break
+        if _should_append_unverified_external_section(request.query):
+            for output in loop_result.tool_outputs:
+                if output.get("name") == "internet_search":
+                    payload = output.get("output", {})
+                    external_info = {
+                        "disclaimer": payload.get(
+                            "disclaimer", "Unverified external search results."
+                        ),
+                        "sources": [
+                            s.get("url")
+                            for s in payload.get("sources", [])
+                            if s.get("url")
+                        ],
+                    }
+                    break
 
         return _GenerationOutcome(
             answer=loop_result.answer,
@@ -1061,7 +1104,7 @@ async def chat(
                 # Finalization (shared by both modes when answer is ready)
                 # ============================================================
                 external_info = None
-                if external_used:
+                if external_used and _should_append_unverified_external_section(request.query):
                     for to in tool_outputs_all:
                         if to.get("name") == "internet_search":
                             payload = to.get("output", {})

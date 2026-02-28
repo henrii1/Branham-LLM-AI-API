@@ -38,6 +38,7 @@ from branham_model_api.api.routes.chat import (  # noqa: E402
     _maybe_override_refusal_for_allowed_query,
     _normalize_english_only_reply,
     _query_mode_prompt_addendum,
+    _should_append_unverified_external_section,
     get_chat_runtime,
 )
 from branham_model_api.core.pipeline import (  # noqa: E402
@@ -206,7 +207,9 @@ def _dump_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=True), encoding="utf-8")
 
 
-def _extract_external_info(tool_outputs: list[dict[str, Any]]) -> dict[str, Any] | None:
+def _extract_external_info(query: str, tool_outputs: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not _should_append_unverified_external_section(query):
+        return None
     for output in tool_outputs:
         if output.get("name") == "internet_search":
             payload = output.get("output", {})
@@ -429,7 +432,7 @@ def _run_full_flow(
         if isinstance(t.get("output"), dict) and t["output"].get("tool_limit_reached")
     ]
 
-    external_info = _extract_external_info(loop_result.tool_outputs)
+    external_info = _extract_external_info(request.query, loop_result.tool_outputs)
     checked = finalize_answer(
         query=request.query,
         answer=loop_result.answer,

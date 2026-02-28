@@ -5,7 +5,7 @@ Prompt/context builders for retrieval + generation flow.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Sequence, Literal
 
 from branham_model_api.core.pipeline.expansion import ExpandedSermon
 
@@ -68,6 +68,51 @@ def _format_sermon_header(sermon: ExpandedSermon) -> str:
     )
 
 
+def _format_sermon_date(date_id: str) -> str | None:
+    """
+    Convert Branham sermon date_id (e.g. "61-0218", "63-0324E") to YYYY-MM-DD.
+    """
+    raw = (date_id or "").strip()
+    if len(raw) < 7 or "-" not in raw:
+        return None
+    yy = raw[:2]
+    rest = raw.split("-", 1)[1]
+    mmdd = "".join(ch for ch in rest if ch.isdigit())[:4]
+    if len(yy) != 2 or len(mmdd) != 4:
+        return None
+    try:
+        year = 1900 + int(yy)
+        month = int(mmdd[:2])
+        day = int(mmdd[2:])
+    except ValueError:
+        return None
+    if not (1 <= month <= 12 and 1 <= day <= 31):
+        return None
+    return f"{year:04d}-{month:02d}-{day:02d}"
+
+
+def format_sermon_context_block_ui(sermon: ExpandedSermon, *, rank: int) -> str:
+    """
+    UI-friendly context block (no dev metadata).
+
+    Shows:
+    - sermon title + derived date
+    - retrieved chunk paragraph ranges + chunk text
+    """
+    title = sermon.title or "Unknown Title"
+    date_str = _format_sermon_date(sermon.date_id)
+    header = f"### {rank}. {title}" + (f" — {date_str}" if date_str else "")
+
+    retrieved_chunks = [c for c in sermon.chunks if getattr(c, "is_retrieved", False)]
+    chunks = retrieved_chunks or list(sermon.chunks)
+    lines: list[str] = [header, f"- Retrieved chunks: {len(retrieved_chunks)}", "", "Chunks:"]
+    for chunk in chunks:
+        lines.append(f"- ¶{chunk.paragraph_start}–¶{chunk.paragraph_end}")
+        lines.append(chunk.text.strip())
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
 def format_sermon_context_block(sermon: ExpandedSermon) -> str:
     """
     Format one sermon's chunk context for prompt injection.
@@ -93,11 +138,28 @@ def format_sermon_context_block(sermon: ExpandedSermon) -> str:
     return "\n".join(lines).strip()
 
 
-def build_rag_context(sermons: Sequence[ExpandedSermon]) -> str:
-    """Build the full RAG context from grouped sermons."""
+def build_rag_context(
+    sermons: Sequence[ExpandedSermon],
+    *,
+    audience: Literal["llm", "ui"] = "llm",
+) -> str:
+    """
+    Build the full RAG context from grouped sermons.
+
+    - audience="llm": stable, metadata-rich format for prompt injection (default, backwards-compatible)
+    - audience="ui": user-friendly markdown for frontend display (no dev metadata)
+    """
     if not sermons:
         return "No RAG context available."
-    blocks = []
+    blocks: list[str] = []
+    if audience == "ui":
+        blocks.append("## Retrieved sermon context")
+        for idx, sermon in enumerate(sermons, start=1):
+            blocks.append(format_sermon_context_block_ui(sermon, rank=idx))
+            blocks.append("")
+        return "\n".join(blocks).strip()
+
+    # Default: LLM/dev format (unchanged)
     for idx, sermon in enumerate(sermons, start=1):
         blocks.append(f"## Context Group {idx}")
         blocks.append(format_sermon_context_block(sermon))

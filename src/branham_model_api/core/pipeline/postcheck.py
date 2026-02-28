@@ -155,7 +155,11 @@ def _strip_non_sermon_sections(answer: str) -> str:
 
     # Remove everything from Reader Note onward (it should be terminal when present).
     reader_idx = next(
-        (i for i, ln in enumerate(lines) if ln.strip().startswith("Reader Note:")),
+        (
+            i
+            for i, ln in enumerate(lines)
+            if "reader note:" in (ln or "").strip().lower()
+        ),
         None,
     )
     if reader_idx is not None:
@@ -164,6 +168,8 @@ def _strip_non_sermon_sections(answer: str) -> str:
     cleaned = "\n".join(lines).strip()
 
     # Remove placeholder References section(s).
+    # We only call this helper when there are NO sermon citations at all,
+    # so "References" is typically empty/placeholder and should be removed.
     cleaned = re.sub(
         r"\n*References:\s*\n\s*-\s*\[N/A\]\s*(?:\n|$)",
         "\n",
@@ -175,6 +181,18 @@ def _strip_non_sermon_sections(answer: str) -> str:
         "\n",
         cleaned,
         flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"\n*#{0,6}\s*References:\s*\n(?:\s*-\s*(?:\[\]|\-|\[\s*\]|None|\[N/?A\])\s*(?:\n|$))+",
+        "\n",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"\n*#{0,6}\s*References:\s*\n\s*-\s*$",
+        "\n",
+        cleaned,
+        flags=re.IGNORECASE | re.MULTILINE,
     )
     return cleaned.strip()
 

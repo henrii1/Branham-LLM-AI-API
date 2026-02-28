@@ -10,12 +10,14 @@ from branham_model_api.core.tools.biography_tool import BiographyTool
 from branham_model_api.core.tools.db_search_tool import DbSearchTool
 from branham_model_api.core.tools.registry import ToolRegistry, ToolSpec
 from branham_model_api.core.tools.serper_tool import SerperTool
+from branham_model_api.core.pipeline.rag_pipeline import RAGPipeline
 from branham_model_api.retrieval.store.chunk_store import ChunkStore
 
 
 def create_default_tool_registry(
     *,
     chunk_store: ChunkStore,
+    rag_pipeline: RAGPipeline | None = None,
     biography_file_path: str | Path = "data/reference/biography.txt",
 ) -> ToolRegistry:
     """
@@ -35,7 +37,15 @@ def create_default_tool_registry(
     """
     return ToolRegistry(
         [
-            ToolSpec(tool=DbSearchTool(chunk_store=chunk_store), max_calls=3),
+            ToolSpec(
+                tool=DbSearchTool(
+                    chunk_store=chunk_store,
+                    faiss_index=(rag_pipeline.faiss_index if rag_pipeline else None),
+                    faiss_id_map=(rag_pipeline.faiss_id_map if rag_pipeline else None),
+                    embedder=(rag_pipeline.embedder if rag_pipeline else None),
+                ),
+                max_calls=3,
+            ),
             ToolSpec(tool=BiographyTool(file_path=Path(biography_file_path)), max_calls=2),
             ToolSpec(tool=SerperTool(), max_calls=2),
         ],

@@ -357,6 +357,111 @@ class ChunkStore:
             for row in cur.fetchall()
         ]
 
+    def search_paragraphs_by_all_tokens(
+        self,
+        tokens: Sequence[str],
+        *,
+        date_id: str | None = None,
+        date_ids: Sequence[str] | None = None,
+        limit: int = 40,
+    ) -> list[ParagraphRecord]:
+        """
+        Search canonical paragraphs requiring ALL token substrings to match.
+
+        This is an AND-style LIKE query:
+          text LIKE %token1% AND text LIKE %token2% ...
+
+        Use for "bag of keywords" quote hunting when exact phrasing is unknown.
+        """
+        toks = [t.strip() for t in (tokens or []) if str(t or "").strip()]
+        if not toks:
+            return []
+
+        try:
+            lim = int(limit)
+        except (TypeError, ValueError):
+            lim = 40
+        lim = max(1, min(lim, 500))
+
+        where: list[str] = []
+        params: list[object] = []
+
+        if date_id:
+            where.append("date_id = ?")
+            params.append(date_id)
+        elif date_ids:
+            dids = list(date_ids)
+            placeholders = ",".join("?" for _ in dids)
+            where.append(f"date_id IN ({placeholders})")
+            params.extend(dids)
+
+        for t in toks:
+            where.append("text LIKE ?")
+            params.append(f"%{t}%")
+
+        cur = self._conn.execute(
+            f"""
+            SELECT date_id, paragraph_no, sub_id, text
+            FROM paragraphs
+            WHERE {" AND ".join(where) if where else "1=1"}
+            ORDER BY
+              date_id ASC,
+              paragraph_no ASC,
+              CASE WHEN sub_id = '' THEN 0 ELSE 1 END ASC,
+              sub_id ASC
+            LIMIT ?
+            """,
+            (*params, lim),
+        )
+        return [
+            ParagraphRecord(
+                date_id=row["date_id"],
+                paragraph_no=int(row["paragraph_no"]),
+                sub_id=row["sub_id"] or "",
+                text=row["text"] or "",
+            )
+            for row in cur.fetchall()
+        ]
+
+    def count_paragraphs_like(
+        self,
+        token: str,
+        *,
+        date_id: str | None = None,
+        date_ids: Sequence[str] | None = None,
+    ) -> int:
+        """
+        Count how many canonical paragraphs contain a substring (LIKE).
+
+        Used to choose rare/high-signal tokens for quote hunting.
+        """
+        t = str(token or "").strip()
+        if not t:
+            return 0
+
+        where: list[str] = []
+        params: list[object] = []
+
+        if date_id:
+            where.append("date_id = ?")
+            params.append(date_id)
+        elif date_ids:
+            dids = list(date_ids)
+            if dids:
+                placeholders = ",".join("?" for _ in dids)
+                where.append(f"date_id IN ({placeholders})")
+                params.extend(dids)
+
+        where.append("text LIKE ?")
+        params.append(f"%{t}%")
+
+        cur = self._conn.execute(
+            f"SELECT COUNT(*) AS c FROM paragraphs WHERE {' AND '.join(where) if where else '1=1'}",
+            tuple(params),
+        )
+        row = cur.fetchone()
+        return int(row["c"] if row and row["c"] is not None else 0)
+
     def get_paragraph_bounds(self, date_id: str) -> tuple[int, int] | None:
         """Return (min_paragraph_no, max_paragraph_no) for a sermon."""
         cur = self._conn.execute(

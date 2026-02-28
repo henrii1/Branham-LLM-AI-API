@@ -5,9 +5,14 @@ DB Search tool for sermon paragraph lookup.
 from __future__ import annotations
 
 import re
+import threading
 from dataclasses import dataclass
 from typing import Any
 
+import faiss  # type: ignore
+import numpy as np
+
+from branham_model_api.retrieval.dense.query import faiss_search
 from branham_model_api.retrieval.store.chunk_store import ChunkStore, ParagraphRecord
 
 
@@ -28,10 +33,15 @@ class DbSearchTool:
     """Tool for sermon paragraph and quote lookup."""
 
     chunk_store: ChunkStore
+    # Optional semantic ("fuzzy") search components (reuse the server's dense index)
+    faiss_index: faiss.Index | None = None
+    faiss_id_map: dict[int, str] | None = None
+    embedder: Any | None = None
     max_paragraphs_per_query: int = 80
     default_sermon_head: int = 80
 
     name: str = "db_search"
+    _embed_lock: threading.Lock = threading.Lock()
 
     def definition(self) -> dict[str, Any]:
         return {
@@ -58,6 +68,15 @@ class DbSearchTool:
                                 "batch_read",
                                 "batch_mixed",
                             ],
+                        },
+                        "match": {
+                            "type": "string",
+                            "enum": ["direct", "semantic"],
+                            "description": (
+                                "Optional matching mode for quote search. "
+                                "Use direct when you know exact/unique words; "
+                                "use semantic when you only have a paraphrase/story."
+                            ),
                         },
                         "date_id": {"type": "string"},
                         "title_query": {
@@ -141,6 +160,11 @@ class DbSearchTool:
                                             "search_quote",
                                             "batch_read",
                                         ],
+                                    },
+                                    "match": {
+                                        "type": "string",
+                                        "enum": ["direct", "semantic"],
+                                        "description": "Optional matching mode for quote search.",
                                     },
                                     "date_id": {"type": "string"},
                                     "title_query": {"type": "string"},
@@ -397,8 +421,10 @@ class DbSearchTool:
         requested_end: int,
     ) -> dict[str, Any]:
         bounds = self.chunk_store.get_paragraph_bounds(date_id)
-        req_start = min(requested_start, requested_end)
-        req_end = max(requested_start, requested_end)
+        rs = self._parse_paragraph_no(requested_start) or 1
+        re_ = self._parse_paragraph_no(requested_end) or rs
+        req_start = min(rs, re_)
+        req_end = max(rs, re_)
         if bounds is None:
             return {
                 "requested_start": req_start,
@@ -411,6 +437,21 @@ class DbSearchTool:
             }
 
         min_no, max_no = bounds
+        # Defensive: tolerate legacy schemas where bounds may be TEXT.
+        min_no_i = self._parse_paragraph_no(min_no) if min_no is not None else None
+        max_no_i = self._parse_paragraph_no(max_no) if max_no is not None else None
+        if min_no_i is None or max_no_i is None:
+            return {
+                "requested_start": req_start,
+                "requested_end": req_end,
+                "final_paragraph_no": None,
+                "valid_start": None,
+                "valid_end": None,
+                "invalid_ranges": [_invalid_range_payload(req_start, req_end)],
+                "has_invalid_request": True,
+            }
+        min_no = min_no_i
+        max_no = max_no_i
         valid_start = max(req_start, min_no)
         valid_end = min(req_end, max_no)
         invalid_ranges: list[dict[str, int]] = []
@@ -434,6 +475,168 @@ class DbSearchTool:
             "invalid_ranges": invalid_ranges,
             "has_invalid_request": len(invalid_ranges) > 0 or valid_start is None or valid_end is None,
         }
+
+    def _semantic_quote_search(
+        self,
+        *,
+        query: str,
+        date_ids: list[str] | None,
+        limit: int,
+    ) -> dict[str, Any]:
+        """
+        Semantic ("fuzzy") search for likely relevant chunks via FAISS, then
+        expand to canonical paragraphs for citation-accurate output.
+        """
+        if not query.strip():
+            return {"ok": False, "error": "query is required for quote search"}
+        if self.faiss_index is None or self.faiss_id_map is None or self.embedder is None:
+            return {"ok": False, "error": "Semantic search not configured on server."}
+
+        try:
+            lim = int(limit)
+        except (TypeError, ValueError):
+            lim = 10
+        lim = max(1, min(lim, 40))
+
+        # Retrieve more than we need, then filter/localize.
+        top_n = max(50, lim * 8)
+        with self._embed_lock:
+            qv = self.embedder.embed_queries([query])
+        hits = (faiss_search(self.faiss_index, qv, top_n=top_n) or [[]])[0]
+
+        date_id_set = set(date_ids or [])
+        chunk_ids: list[str] = []
+        for h in hits:
+            cid = self.faiss_id_map.get(int(h.faiss_id))
+            if not cid:
+                continue
+            if date_id_set:
+                # chunk_id format: "{date_id}_chunk_{n}"
+                sid = cid.split("_chunk_", 1)[0]
+                if sid not in date_id_set:
+                    continue
+            chunk_ids.append(cid)
+            if len(chunk_ids) >= lim:
+                break
+
+        if not chunk_ids:
+            return {"ok": True, "mode": "search_quote_global", "sermons": [], "match": "semantic"}
+
+        chunks = self.chunk_store.get_chunks(chunk_ids)
+        sermon_map: dict[str, dict[str, Any]] = {}
+        total_paragraphs = 0
+        for cid in chunk_ids:
+            ch = chunks.get(cid)
+            if ch is None:
+                continue
+            remaining = self.max_paragraphs_per_query - total_paragraphs
+            if remaining <= 0:
+                break
+            rows = self.chunk_store.get_paragraphs_by_range(ch.date_id, ch.paragraph_start, ch.paragraph_end)
+            rows = rows[:remaining]
+            total_paragraphs += len(rows)
+
+            sermon = sermon_map.get(ch.date_id)
+            if sermon is None:
+                meta = self.chunk_store.get_sermon(ch.date_id)
+                sermon = {"date_id": ch.date_id, "title": meta.title if meta else None, "ranges": []}
+                sermon_map[ch.date_id] = sermon
+            sermon["ranges"].append(
+                {
+                    "paragraph_start": ch.paragraph_start,
+                    "paragraph_end": ch.paragraph_end,
+                    "paragraphs": [_paragraph_payload(p) for p in rows],
+                    "range_info": self._build_range_info(
+                        date_id=ch.date_id,
+                        requested_start=ch.paragraph_start,
+                        requested_end=ch.paragraph_end,
+                    ),
+                }
+            )
+
+        return {"ok": True, "mode": "search_quote_global", "sermons": list(sermon_map.values()), "match": "semantic"}
+
+    def _direct_multi_token_quote_search(
+        self,
+        *,
+        tokens: list[str],
+        date_ids: list[str] | None,
+        row_limit: int,
+    ) -> list[ParagraphRecord]:
+        """
+        Direct LIKE-based search, but approximates an AND query by:
+        - searching each token separately
+        - scoring paragraphs by how many tokens they matched
+        Returns the best-scoring paragraph rows (may include sub_id parts).
+        """
+        if not tokens:
+            return []
+
+        stop = {
+            "the",
+            "and",
+            "for",
+            "with",
+            "that",
+            "this",
+            "from",
+            "into",
+            "your",
+            "you",
+            "are",
+            "was",
+            "were",
+            "have",
+            "has",
+            "had",
+            "his",
+            "her",
+            "she",
+            "him",
+            "they",
+            "them",
+            "not",
+            "but",
+        }
+        toks = []
+        for t in tokens:
+            tt = re.sub(r"\s+", " ", (t or "").strip())
+            if not tt:
+                continue
+            if len(tt) < 3 and not tt.isdigit():
+                continue
+            if tt.casefold() in stop:
+                continue
+            toks.append(tt)
+            if len(toks) >= 8:
+                break
+
+        if not toks:
+            return []
+
+        per_token_limit = max(10, min(self.max_paragraphs_per_query, row_limit * 15))
+        rows_by_key: dict[tuple[str, int, str], ParagraphRecord] = {}
+        counts: dict[tuple[str, int, str], int] = {}
+
+        for tok in toks:
+            if date_ids:
+                rows = self.chunk_store.search_paragraphs_by_text_many(
+                    tok, date_ids=date_ids, limit=per_token_limit
+                )
+            else:
+                rows = self.chunk_store.search_paragraphs_by_text(tok, date_id=None, limit=per_token_limit)
+            for r in rows:
+                key = (r.date_id, r.paragraph_no, r.sub_id)
+                rows_by_key.setdefault(key, r)
+                counts[key] = counts.get(key, 0) + 1
+
+        ranked = sorted(
+            rows_by_key.keys(),
+            key=lambda k: (-counts.get(k, 0), k[0], k[1], k[2]),
+        )
+        # Return more than row_limit to allow grouping by sermon downstream.
+        cap = max(1, min(len(ranked), row_limit * 3))
+        return [rows_by_key[k] for k in ranked[:cap]]
 
     def execute(self, args: dict[str, Any]) -> dict[str, Any]:
         mode = str(args.get("mode", "")).strip()
@@ -578,6 +781,9 @@ class DbSearchTool:
 
         if mode in {"search_quote", "search_quote_global", "search_quote_local"}:
             query = str(args.get("query", "")).strip()
+            query_like = query.replace('"', "").strip()
+            if not query_like:
+                query_like = query
             date_id_raw = str(args.get("date_id", "")).strip()
             resolution = None
             date_ids: list[str] = []
@@ -608,17 +814,115 @@ class DbSearchTool:
             if not query:
                 return {"ok": False, "error": "query is required for quote search"}
             row_limit = max(1, min(limit, self.max_paragraphs_per_query))
+
+            match = str(args.get("match") or "direct").strip().lower()
+            if match not in {"direct", "semantic"}:
+                match = "direct"
+
+            if match == "semantic":
+                out = self._semantic_quote_search(query=query, date_ids=date_ids or None, limit=row_limit)
+                out["mode"] = mode
+                if resolution:
+                    out["resolution"] = resolution
+                return out
+
+            # If the model provides a bag of keywords (e.g. quoted tokens), do an
+            # AND-like direct search by token intersection instead of literal substring.
+            quoted = re.findall(r"\"([^\"]{1,80})\"", query)
+            # If there's a quoted phrase (e.g. "hell on earth"), probe it directly first.
+            # This avoids failing on composite strings like: '"hell on earth" marry boy girl'
+            rows: list[ParagraphRecord] = []
+            if quoted:
+                for phrase in sorted(quoted, key=lambda s: (-len(s), s.casefold()))[:3]:
+                    phrase = (phrase or "").strip()
+                    if len(phrase) < 3:
+                        continue
+                    if date_ids:
+                        phrase_rows = self.chunk_store.search_paragraphs_by_text_many(
+                            phrase, date_ids=date_ids, limit=row_limit * 3
+                        )
+                    else:
+                        phrase_rows = self.chunk_store.search_paragraphs_by_text(
+                            phrase, date_id=None, limit=row_limit * 3
+                        )
+                    if phrase_rows:
+                        rows = phrase_rows
+                        break
+
+            if not rows and quoted and len(quoted) >= 3:
+                # First try an AND-style query over the rarest/highest-signal tokens.
+                # No hardcoded topic words: choose phrases that occur least in the corpus.
+                stop = {
+                    "the",
+                    "and",
+                    "for",
+                    "with",
+                    "that",
+                    "this",
+                    "from",
+                    "into",
+                    "your",
+                    "you",
+                    "are",
+                    "was",
+                    "were",
+                    "have",
+                    "has",
+                    "had",
+                    "his",
+                    "her",
+                    "she",
+                    "him",
+                    "they",
+                    "them",
+                    "not",
+                    "but",
+                }
+                candidates: list[str] = []
+                for t in quoted:
+                    tt = (t or "").strip()
+                    if len(tt) < 3:
+                        continue
+                    if tt.casefold() in stop:
+                        continue
+                    candidates.append(tt)
+                # Score by (count asc, length desc) so rare phrases win.
+                scored: list[tuple[int, int, str]] = []
+                for t in candidates[:12]:
+                    try:
+                        c = self.chunk_store.count_paragraphs_like(t, date_ids=(date_ids or None))
+                    except Exception:
+                        c = 10**9
+                    scored.append((c, -len(t), t))
+                scored.sort()
+                preferred = [t for _, __, t in scored[:3]] or sorted(candidates, key=lambda x: (-len(x), x.casefold()))[:3]
+                try:
+                    and_rows = self.chunk_store.search_paragraphs_by_all_tokens(
+                        preferred[:3],
+                        date_ids=(date_ids or None),
+                        limit=row_limit * 3,
+                    )
+                except Exception:
+                    and_rows = []
+                rows = and_rows or self._direct_multi_token_quote_search(
+                    tokens=quoted, date_ids=(date_ids or None), row_limit=row_limit
+                )
+            elif not rows:
+                rows = []
             if date_ids:
                 if len(date_ids) == 1:
-                    rows = self.chunk_store.search_paragraphs_by_text(
-                        query, date_id=date_ids[0], limit=row_limit * 3
-                    )
+                    if not rows:
+                        rows = self.chunk_store.search_paragraphs_by_text(
+                            query_like, date_id=date_ids[0], limit=row_limit * 3
+                        )
                 else:
-                    rows = self.chunk_store.search_paragraphs_by_text_many(
-                        query, date_ids=date_ids, limit=row_limit * 3
-                    )
+                    if not rows:
+                        rows = self.chunk_store.search_paragraphs_by_text_many(
+                            query_like, date_ids=date_ids, limit=row_limit * 3
+                        )
             else:
-                rows = self.chunk_store.search_paragraphs_by_text(query, date_id=None, limit=row_limit * 3)
+                if not rows:
+                    rows = self.chunk_store.search_paragraphs_by_text(query_like, date_id=None, limit=row_limit * 3)
             grouped: dict[str, list[ParagraphRecord]] = {}
             for row in rows:
                 grouped.setdefault(row.date_id, []).append(row)
@@ -643,6 +947,15 @@ class DbSearchTool:
             out: dict[str, Any] = {"ok": True, "mode": mode, "sermons": sermons}
             if resolution:
                 out["resolution"] = resolution
+            # If direct match returns nothing and this looks like a paraphrase/story,
+            # fall back to semantic search when configured (tool-efficient curiosity).
+            if not sermons and len(query) >= 40 and self.faiss_index is not None and self.faiss_id_map is not None and self.embedder is not None:
+                sem = self._semantic_quote_search(query=query, date_ids=date_ids or None, limit=row_limit)
+                sem["mode"] = mode
+                if resolution:
+                    sem["resolution"] = resolution
+                sem["match"] = "semantic_fallback"
+                return sem
             return out
 
         if mode == "batch_read":

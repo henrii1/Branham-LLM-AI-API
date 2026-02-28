@@ -57,7 +57,7 @@ from branham_model_api.generation import (  # noqa: E402
 )
 
 # ---- Editable defaults for quick local manual checks ----
-DEFAULT_QUERY = """I want to """
+DEFAULT_QUERY = """can you tell me  """
 DEFAULT_HISTORY_WINDOW = []
 
 """[
@@ -393,9 +393,16 @@ def _run_full_flow(
         }
         return run_report
 
-    rag_context = build_rag_context(retrieval_result.expanded_sermons)
+    # Build UI + LLM contexts in parallel. UI is for artifact viewing;
+    # LLM context preserves the metadata-rich format used in production.
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        rag_ui_f = pool.submit(build_rag_context, retrieval_result.expanded_sermons, audience="ui")
+        rag_llm_f = pool.submit(build_rag_context, retrieval_result.expanded_sermons, audience="llm")
+        rag_context_ui = rag_ui_f.result()
+        rag_context_llm = rag_llm_f.result()
     if dump_artifacts:
-        _dump_text(LATEST_RAG_CONTEXT, rag_context)
+        _dump_text(LATEST_RAG_CONTEXT, rag_context_ui)
         logger.debug("RAG context written: %s", LATEST_RAG_CONTEXT.resolve())
 
     system_prompt = build_system_prompt(
@@ -405,7 +412,7 @@ def _run_full_flow(
     llm_messages = build_chat_messages(
         system_prompt=system_prompt,
         query=request.query,
-        rag_context=rag_context,
+        rag_context=rag_context_llm,
         history_window=request.history_window,
     )
     if dump_artifacts:

@@ -74,6 +74,9 @@ class RetrievalSignals:
 # Patterns that indicate quote-seeking intent
 QUOTE_INTENT_PATTERNS = [
     r"\bexact\s+quote\b",
+    r"\bspecific\s+quote\b",
+    r"\bverbatim\b",
+    r"\bfind\s+the\s+quote\b",
     r"\bwhere\s+did\s+he\s+say\b",
     r"\bwhich\s+sermon\b",
     r"\bwhat\s+did\s+(?:brother\s+)?branham\s+say\b",

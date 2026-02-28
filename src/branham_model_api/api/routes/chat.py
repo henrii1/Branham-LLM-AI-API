@@ -285,7 +285,8 @@ class ChatRuntime:
                 key_mgr.key_count,
             )
         self.tool_registry = create_default_tool_registry(
-            chunk_store=self.pipeline.chunk_store
+            chunk_store=self.pipeline.chunk_store,
+            rag_pipeline=self.pipeline,
         )
         # Keep non-streaming runner for test scripts
         self.tool_runner = ToolLoopRunner(
@@ -438,6 +439,30 @@ def _extract_delta_tool_calls(chunk: Any) -> list[dict[str, Any]] | None:
             return result
     except Exception:
         pass
+    try:
+        # Dict-shaped chunks (some providers / LiteLLM modes)
+        choices = (chunk or {}).get("choices", []) if isinstance(chunk, dict) else []
+        if not choices:
+            return None
+        delta = choices[0].get("delta", {}) or {}
+        tc = delta.get("tool_calls")
+        if tc:
+            result = []
+            for item in tc:
+                fn = (item or {}).get("function") or {}
+                result.append(
+                    {
+                        "index": item.get("index", 0),
+                        "id": item.get("id"),
+                        "function": {
+                            "name": fn.get("name"),
+                            "arguments": fn.get("arguments"),
+                        },
+                    }
+                )
+            return result
+    except Exception:
+        pass
     return None
 
 
@@ -464,6 +489,10 @@ def _maybe_batch_db_search_tool_calls(
             parsed_args = json.loads(raw_args) if raw_args else {}
         except json.JSONDecodeError:
             parsed_args = {}
+        # If the model already requested a batch mode, do not wrap it again.
+        # Nested batch_mixed would be skipped by the tool and cause result misalignment.
+        if isinstance(parsed_args, dict) and parsed_args.get("mode") in {"batch_mixed", "batch_read"}:
+            return ({}, False)
         db_calls.append((tcid, parsed_args))
 
     if len(db_calls) <= 1:
@@ -680,15 +709,18 @@ async def chat(
 
         # ---- English-only language gate (deterministic) ----
         if not _is_english_request(query=request.query, user_language=request.user_language):
+            ul = (request.user_language or "").strip()
+            # NOTE: We do NOT stream the translator output directly because models may add
+            # extra formatting/lines. Instead, we request strict JSON and render the
+            # final two-line reply deterministically server-side.
             system_prompt = (
                 "You are a translator.\n"
                 "Task: translate the provided English message into the user's language.\n"
-                "Output rules (hard):\n"
-                "- Output markdown only.\n"
-                "- Output EXACTLY two lines:\n"
-                "  1) Answer:\n"
-                "  2) <one short paragraph in the user's language>\n"
-                "- Do NOT add any other lines.\n"
+                + (f"Target language (hint): {ul}\n" if ul else "")
+                + "Output rules (hard):\n"
+                "- Output ONLY a JSON object with exactly one key: paragraph\n"
+                "- The value must be ONE short paragraph (2–4 sentences) in the user's language.\n"
+                "- Do NOT include markdown, code fences, explanations, or extra keys.\n"
                 "- Do NOT include citations or sermon claims.\n"
             )
             messages = [
@@ -703,21 +735,22 @@ async def chat(
             ]
 
             t_first_delta: float | None = None
-            parts: list[str] = []
-            for chunk in runtime.llm_client.stream_completion(
-                messages=messages,
-                tools=None,
-                tool_choice="none",
-            ):
-                text = _extract_delta_text(chunk)
-                if not text:
-                    continue
-                if t_first_delta is None:
-                    t_first_delta = time.perf_counter()
-                parts.append(text)
-                yield _sse_event("delta", {"text": text})
+            paragraph = ""
+            try:
+                resp = runtime.llm_client.completion(messages=messages, max_tokens=200)
+                raw = (resp.choices[0].message.content or "").strip()
+                data = json.loads(raw) if raw else {}
+                paragraph = str((data or {}).get("paragraph") or "").strip()
+            except Exception:
+                paragraph = ""
 
-            final_text = _normalize_english_only_reply(("".join(parts) or "").strip())
+            if not paragraph:
+                # Fallback: stable English-only message (still two-line format).
+                paragraph = _ENGLISH_ONLY_MESSAGE
+
+            final_text = "Answer:\n" + paragraph
+            t_first_delta = time.perf_counter()
+            yield _sse_event("delta", {"text": final_text})
             yield _sse_event(
                 "final",
                 {
@@ -770,14 +803,23 @@ async def chat(
                 )
                 return
 
-            # Emit full RAG context as soon as we have it for non-refusal flows.
-            # This allows the frontend to render evidence immediately while the LLM streams.
-            rag_context = build_rag_context(retrieval_result.expanded_sermons)
+            # Emit UI RAG context as soon as it's ready to hide downstream latency.
+            # Build the LLM RAG context concurrently (we need it before starting the LLM call).
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                rag_llm_f = pool.submit(
+                    build_rag_context,
+                    retrieval_result.expanded_sermons,
+                    audience="llm",
+                )
+                rag_context_ui = build_rag_context(
+                    retrieval_result.expanded_sermons,
+                    audience="ui",
+                )
             yield _sse_event(
                 "rag",
                 {
                     "retrieval_query": retrieval_query,
-                    "rag_context": rag_context,
+                    "rag_context": rag_context_ui,
                     "retrieval": {
                         "should_refuse": retrieval_result.should_refuse,
                         "refuse_reason": retrieval_result.refuse_reason,
@@ -796,6 +838,7 @@ async def chat(
                     },
                 },
             )
+            rag_context_llm = rag_llm_f.result()
 
             # ---- Build messages ----
             system_prompt = build_system_prompt(
@@ -805,7 +848,7 @@ async def chat(
             working_messages = build_chat_messages(
                 system_prompt=system_prompt,
                 query=request.query,
-                rag_context=rag_context,
+                rag_context=rag_context_llm,
                 history_window=request.history_window,
             )
 
@@ -877,7 +920,7 @@ async def chat(
                                 output["context_hints"] = {
                                     "has_original_query": True,
                                     "has_history_window": bool(request.history_window),
-                                    "has_rag_context": bool(rag_context.strip()),
+                                    "has_rag_context": bool(rag_context_llm.strip()),
                                     "prior_tool_outputs_count": len(tool_outputs_all),
                                 }
                                 tool_outputs_all.append({"name": tool_name, "output": output})
@@ -928,7 +971,7 @@ async def chat(
                                 immediate["context_hints"] = {
                                     "has_original_query": True,
                                     "has_history_window": bool(request.history_window),
-                                    "has_rag_context": bool(rag_context.strip()),
+                                    "has_rag_context": bool(rag_context_llm.strip()),
                                     "prior_tool_outputs_count": len(tool_outputs_all),
                                 }
                                 tasks.append((c, tool_name, None, immediate))

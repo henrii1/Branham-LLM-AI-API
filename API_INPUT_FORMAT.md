@@ -105,12 +105,14 @@ Error path may include:
 
 ### `rag` event (NEW: retrieval-first evidence)
 
-This event is emitted immediately after retrieval completes and **before** any model tokens stream.
+This event is emitted as soon as retrieval completes and the UI-formatted evidence is ready.
+
+Important: `rag` is intentionally sent **before** the server begins streaming model tokens so the frontend can display evidence immediately and show a “finalizing response” / “thinking” state while waiting for the first `delta`.
 
 ```json
 {
   "retrieval_query": "What did Brother Branham teach about faith?\n\nConversation summary:\n...",
-  "rag_context": "## Context Group 1\n### Sermon: ...\n...",
+  "rag_context": "## Retrieved sermon context\n### 1. SERMON TITLE — YYYY-MM-DD\n- Retrieved chunks: N\n\nChunks:\n- ¶X–¶Y\n...",
   "retrieval": {
     "should_refuse": false,
     "refuse_reason": null,

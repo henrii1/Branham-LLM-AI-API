@@ -62,6 +62,10 @@ def _batched_db_search_outputs(
             parsed_args = json.loads(raw_args) if raw_args else {}
         except json.JSONDecodeError:
             parsed_args = {}
+        # If the model already requested a batch mode, do not wrap it again.
+        # Nested batch_mixed would be skipped by the tool and cause result misalignment.
+        if isinstance(parsed_args, dict) and parsed_args.get("mode") in {"batch_mixed", "batch_read"}:
+            return {}
         db_calls.append((getattr(tc, "id", ""), parsed_args))
 
     if len(db_calls) <= 1:

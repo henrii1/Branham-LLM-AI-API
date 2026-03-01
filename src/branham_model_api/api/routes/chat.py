@@ -9,6 +9,7 @@ Streaming-first architecture:
 """
 from __future__ import annotations
 
+import asyncio
 import concurrent.futures
 import json
 import logging
@@ -743,11 +744,13 @@ async def chat(
     _validate_bearer_auth(authorization)
 
     async def event_stream():
+        _loop = asyncio.get_running_loop()
         t_request = time.perf_counter()
         yield _sse_event(
             "start",
             {"conversation_id": request.conversation_id},
         )
+        await asyncio.sleep(0)
         runtime = get_chat_runtime()
 
         # ---- English-only language gate (deterministic) ----
@@ -817,9 +820,12 @@ async def chat(
         try:
             # ---- Retrieval ----
             t_retrieval_start = time.perf_counter()
-            retrieval_result = runtime.retrieve(
-                retrieval_query,
-                user_language=request.user_language,
+            retrieval_result = await _loop.run_in_executor(
+                None,
+                lambda: runtime.retrieve(
+                    retrieval_query,
+                    user_language=request.user_language,
+                ),
             )
             t_retrieval_ms = (time.perf_counter() - t_retrieval_start) * 1000
             logger.info("Retrieval completed in %.1fms", t_retrieval_ms)
@@ -881,6 +887,7 @@ async def chat(
                     },
                 },
             )
+            await asyncio.sleep(0)
             rag_context_llm = rag_llm_f.result()
 
             # ---- Build messages ----
@@ -918,12 +925,15 @@ async def chat(
                 # MODE A — Tools offered: buffer completely, then decide
                 # ============================================================
                 if offer_tools:
-                    buffered = _consume_stream_buffered(
-                        runtime.llm_client.stream_completion(
-                            messages=working_messages,
-                            tools=offer_tools,
-                            tool_choice="auto",
-                        )
+                    buffered = await _loop.run_in_executor(
+                        None,
+                        lambda: _consume_stream_buffered(
+                            runtime.llm_client.stream_completion(
+                                messages=working_messages,
+                                tools=offer_tools,
+                                tool_choice="auto",
+                            )
+                        ),
                     )
 
                     if buffered.has_tool_calls:

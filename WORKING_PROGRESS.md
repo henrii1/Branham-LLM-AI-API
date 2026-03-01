@@ -533,9 +533,9 @@ This checklist is the working sequence for completing V1 API delivery.
 - [x] Track fixes in `LATENCY_IMPROVEMENT_PLAN.md`.
 
 #### Final Step — Cloud Run Deployment
-- [ ] Deploy to Google Cloud Run (final rollout step).
-- [ ] Set Cloud Run `max instances` to `5` (cost-aware baseline; tune later).
-- [ ] Add detailed Cloud Run parameters (concurrency/min instances/timeouts) in follow-up deployment notes.
+- [x] Deploy to Google Cloud Run (final rollout step).
+- [x] Set Cloud Run `max instances` to `5` (cost-aware baseline; tune later).
+- [x] Add detailed Cloud Run parameters (concurrency/min instances/timeouts) in follow-up deployment notes.
 
 ---
 
@@ -548,3 +548,76 @@ This checklist is the working sequence for completing V1 API delivery.
   - Otherwise, non-ASCII alphabetic characters trigger non-English handling.
   - ASCII-only non-English queries require the frontend to provide `user_language`.
 - ✅ `scripts/test_chat_full_flow.py` matches the API gate behavior for non-stream debugging.
+
+---
+
+## 2026-02-28
+
+### Cloud Run Deployment Infrastructure
+
+**GCP Project**: `elevated-codex-487017-a6` (Branham LLM API Project)
+**Account**: `admin@branhamsermons.ai`
+**Region**: `us-central1`
+**Service**: `branham-llm-api`
+
+#### Artifacts Created
+
+1. **`Dockerfile`** — Multi-stage build:
+   - Builder stage: `uv sync --frozen --no-dev` + HF model prefetch (`Qwen/Qwen3-Embedding-0.6B`)
+   - Runtime stage: slim image with `.venv`, HF cache, code, config, data indices
+   - Reranker and langid auto-skipped (config: `never`)
+
+2. **`docker/entrypoint.sh`** — Container startup:
+   - Warms embedding model into memory (`--warm-only`)
+   - Starts uvicorn on `$PORT` (Cloud Run injects `PORT=8080`)
+
+3. **`scripts/deploy_cloudrun.py`** — Deployment script:
+   - Reads `.env` → Cloud Run env vars (all API keys injected at deploy time)
+   - `docker build --platform linux/amd64` locally
+   - `docker push` to Artifact Registry (`us-central1-docker.pkg.dev`)
+   - `gcloud run deploy` with full resource config
+
+4. **`.dockerignore`** — Excludes non-runtime files (~2 GB savings):
+   - `training/`, `datasets/ingest/`, `tests/`, `.venv/`, `.git/`, `data/raw/`
+
+5. **`src/branham_model_api/api/routes/health.py`** — Real readiness check:
+   - Validates: bearer key, retrieval pipeline, LLM client, tool registry, key count
+
+#### Cloud Run Parameters
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| Memory | 4Gi | 600 MB data + ~1.2 GB model + runtime |
+| CPU | 2 | Embedding inference + concurrent retrieval |
+| Max instances | 5 | Cost-aware baseline |
+| Min instances | 1 | Avoid cold starts (~30s model load) |
+| Concurrency | 10 | SSE long-lived connections |
+| Request timeout | 300s | Tool loop iterations + LLM latency |
+| Port | 8080 | Cloud Run default |
+| CPU boost | enabled | Faster startup warm |
+| Allow unauth | yes | Public API (bearer key enforced in code) |
+
+#### Container Image Contents
+
+| Path | Size | Purpose |
+|------|------|---------|
+| `.venv/` | ~1.5 GB | Python deps (torch, transformers, litellm, etc.) |
+| `.hf-cache/` | ~1.2 GB | Qwen3-Embedding-0.6B weights |
+| `data/indices/` | 259 MB | BM25 + FAISS indices |
+| `data/processed/chunks.sqlite` | 347 MB | Sermon text store |
+| `data/reference/biography.txt` | 20 KB | Biography tool data |
+| `src/branham_model_api/` | ~200 KB | Application code (44 modules) |
+| `config/default.yaml` | 8 KB | Runtime configuration |
+
+#### Deploy Command
+
+```bash
+# 1. Re-authenticate (if tokens expired)
+gcloud auth login admin@branhamsermons.ai
+
+# 2. Deploy
+uv run python scripts/deploy_cloudrun.py
+
+# 3. Preview without deploying
+uv run python scripts/deploy_cloudrun.py --dry-run
+```

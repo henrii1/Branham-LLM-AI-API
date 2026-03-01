@@ -268,8 +268,7 @@ def main() -> None:
     reranker_mode = _read_reranker_mode_from_default_config()
     effective_skip_reranker = args.skip_reranker
     if (
-        args.all
-        and not args.force_reranker
+        not args.force_reranker
         and not args.skip_reranker
         and reranker_mode == "never"
     ):

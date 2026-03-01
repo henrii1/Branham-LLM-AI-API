@@ -1,0 +1,63 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.py[cod]
+*.egg-info
+.venv
+venv
+.eggs
+
+# Dev / IDE
+.cursor
+.vscode
+.idea
+*.swp
+*.swo
+.DS_Store
+
+# Non-runtime directories
+training/
+datasets/ingest/
+datasets/export/
+datasets/raw/
+tests/
+models/
+
+# Large data not needed at runtime
+data/raw/
+data/benchmarks/
+data/experiments/
+data/logs/
+data/training/
+data/processed/chunks_manual.sqlite
+data/processed/*.tsv
+
+# Build / CI
+# Exclude most .md files except README.md (required by hatchling build)
+API_INPUT_FORMAT.md
+LATENCY_IMPROVEMENT_PLAN.md
+PROJECT_STATUS.md
+REPOSITORY_TREE.md
+SETUP_COMMANDS.md
+WORKING_PROGRESS.md
+!data/reference/*.txt
+LICENSE
+split_output.log
+
+# Env / secrets (injected at runtime)
+.env
+.env.*
+config/local.yaml
+config/secrets.yaml
+
+# HF cache (built inside image)
+.hf-cache/
+
+# Docker
+Dockerfile
+.dockerignore
+# Allow docker/entrypoint.sh (needed by COPY), exclude rest
+!docker/entrypoint.sh

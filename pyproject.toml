@@ -6,46 +6,61 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = {text = "MIT"}
 dependencies = [
+    # ── API server ──
+    "fastapi>=0.128.0",
+    "uvicorn[standard]>=0.40.0",
+    "sse-starlette>=3.1.2",
+    "pydantic>=2.12.5",
+
+    # ── Retrieval (BM25 + FAISS) ──
+    "faiss-cpu>=1.13.2",
+    "numpy>=2.4.1",
+    "spacy>=3.8.11",
+
+    # ── Embedding model (CPU-only inference) ──
+    "torch>=2.9.1",
+    "transformers>=4.57.3",
+    "safetensors>=0.7.0",
+    "sentencepiece>=0.2.1",
+    "huggingface_hub[cli]",
+
+    # ── LLM client (OpenRouter / DeepSeek via LiteLLM) ──
+    "litellm>=1.81.10",
+    "tiktoken>=0.12.0",
+
+    # ── Tools & utilities ──
+    "requests>=2.31.0",
+    "langid>=1.1.6",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+# Training / fine-tuning (GPU required, not needed for serving)
+training = [
     "accelerate>=1.12.0",
-    "aiosqlite>=0.22.1",
-    "beautifulsoup4>=4.12.0",
     "bitsandbytes>=0.49.1",
     "datasets>=4.4.2",
     "einops>=0.8.1",
     "evaluate>=0.4.6",
-    "faiss-cpu>=1.13.2",
-    "fastapi>=0.128.0",
-    "gunicorn>=23.0.0",
-    "ninja>=1.13.0",
     "peft>=0.18.0",
-    "pymupdf>=1.24.0",
-    "protobuf>=6.33.2",
-    "pydantic>=2.12.5",
-    "pydantic-settings>=2.12.0",
-    "rank-bm25>=0.2.2",
-    "requests>=2.31.0",
-    "safetensors>=0.7.0",
-    "scipy>=1.16.3",
-    "sentencepiece>=0.2.1",
-    "spacy>=3.8.11",
-    "sse-starlette>=3.1.2",
     "tensorboard>=2.20.0",
-    "tiktoken>=0.12.0",
-    "torch>=2.9.1",
-    "transformers>=4.57.3",
     "trl>=0.26.2",
-    "uvicorn[standard]>=0.40.0",
     "wandb>=0.23.1",
-    "huggingface_hub[cli]",
-    "numpy>=2.4.1",
-    "lingua-language-detector>=2.1.1",
-    "langid>=1.1.6",
-    "litellm>=1.81.10",
+    "ninja>=1.13.0",
 ]
 
-[project.optional-dependencies]
-# Note: faiss-gpu doesn't support Python 3.12 yet (max is 3.10)
-# For GPU support, you may need to build from source or use Python 3.10
+# Data ingestion pipeline (not needed for serving)
+ingest = [
+    "beautifulsoup4>=4.12.0",
+    "pymupdf>=1.24.0",
+    "lingua-language-detector>=2.1.1",
+    "aiosqlite>=0.22.1",
+    "rank-bm25>=0.2.2",
+    "scipy>=1.16.3",
+    "pydantic-settings>=2.12.0",
+    "protobuf>=6.33.2",
+    "gunicorn>=23.0.0",
+]
 
 # Optional optimizations (gated by flags)
 optimum = [
@@ -53,7 +68,6 @@ optimum = [
 ]
 
 # Flash attention / xformers (optional, gated by flags)
-# Note: xformers may have compatibility issues with latest PyTorch
 flash-attn = [
     "flash-attn>=2.0.0",
 ]
@@ -72,9 +86,6 @@ postgres = [
 
 # vLLM support (for online serving - query embedding and reranking)
 # Note: vLLM requires CUDA; for Apple Silicon dev, use HuggingFace path
-# IMPORTANT: vLLM has strict version requirements. Install separately:
-#   pip install vllm>=0.8.5
-# Commented out to avoid dependency resolution issues with torch/numpy versions
 # vllm-serving = [
 #     "vllm>=0.8.5",
 # ]

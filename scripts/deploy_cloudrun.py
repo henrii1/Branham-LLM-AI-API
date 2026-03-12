@@ -1,33 +1,41 @@
 #!/usr/bin/env python3
 """
-Deploy Branham LLM API to Google Cloud Run from local Docker build.
+Deploy Branham LLM API to Google Cloud Run.
 
-Flow (mirrors work deploy script pattern):
+Supported build modes:
+  - local: Docker builds/pushes from the local machine
+  - cloudbuild: Google Cloud Build builds and pushes remotely
+
+Flow:
   1. Read .env → build Cloud Run --set-env-vars string
-  2. Ensure Artifact Registry repo exists
-  3. docker build --platform linux/amd64
-  4. docker tag + docker push to Artifact Registry
+  2. Ensure required APIs are enabled
+  3. Ensure Artifact Registry repo exists
+  4. Build/push image via selected build mode
   5. gcloud run deploy with env vars, resource limits, scaling
 
 Prerequisites:
   - gcloud CLI installed and authenticated:
       gcloud auth login admin@branhamsermons.ai
       gcloud config set project <PROJECT_ID>
-  - Docker Desktop running
+  - local mode only: Docker Desktop running
   - .env file with API keys
 
 Usage:
   uv run python scripts/deploy_cloudrun.py
-  uv run python scripts/deploy_cloudrun.py --dry-run   # preview only
+  uv run python scripts/deploy_cloudrun.py --build-mode local
+  uv run python scripts/deploy_cloudrun.py --build-mode cloudbuild
+  uv run python scripts/deploy_cloudrun.py --dry-run
 """
 
 from __future__ import annotations
 
+import argparse
 import os
 import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Sequence
 
 # ── Configuration ───────────────────────────────────────────────────
 PROJECT_ID = "elevated-codex-487017-a6"
@@ -47,6 +55,7 @@ REQUEST_TIMEOUT = 300
 PORT = 8080
 # Startup budget: model warm ≈ 30s + uvicorn boot ≈ 5s + buffer
 STARTUP_CPU_BOOST = True
+BUILD_MODES = ("local", "cloudbuild")
 
 
 def run(cmd: list[str], *, check: bool = True, capture: bool = False) -> subprocess.CompletedProcess:
@@ -97,13 +106,20 @@ def ensure_gcloud_auth() -> None:
     print(f"gcloud project: {PROJECT_ID}")
 
 
-def ensure_apis() -> None:
-    """Enable required GCP APIs if not already enabled."""
+def required_apis(build_mode: str) -> list[str]:
+    """Return the GCP APIs needed for the selected build mode."""
     apis = [
         "run.googleapis.com",
         "artifactregistry.googleapis.com",
     ]
-    for api in apis:
+    if build_mode == "cloudbuild":
+        apis.append("cloudbuild.googleapis.com")
+    return apis
+
+
+def ensure_apis(build_mode: str) -> None:
+    """Enable required GCP APIs if not already enabled."""
+    for api in required_apis(build_mode):
         result = run(
             ["gcloud", "services", "list", "--enabled",
              "--filter", f"name:{api}", "--format", "value(name)"],
@@ -135,26 +151,50 @@ def ensure_artifact_registry() -> None:
         print(f"Artifact Registry repo exists: {AR_REPO}")
 
 
-def docker_build(image_tag: str) -> None:
-    """Build Docker image locally for linux/amd64."""
-    run([
+def build_local_docker_cmd(image_tag: str) -> list[str]:
+    """Return the local Docker build command."""
+    return [
         "docker", "build",
         "--platform", "linux/amd64",
         "-t", image_tag,
         ".",
-    ])
+    ]
+
+
+def docker_build(image_tag: str) -> None:
+    """Build Docker image locally for linux/amd64."""
+    run(build_local_docker_cmd(image_tag))
+
+
+def build_docker_push_cmd(image_tag: str) -> list[str]:
+    """Return the local Docker push command."""
+    return ["docker", "push", image_tag]
 
 
 def docker_push(image_tag: str) -> None:
     """Authenticate Docker and push to Artifact Registry."""
     run(["gcloud", "auth", "configure-docker", AR_DOMAIN, "--quiet"])
-    run(["docker", "push", image_tag])
+    run(build_docker_push_cmd(image_tag))
 
 
-def cloud_run_deploy(image_tag: str, env_vars: dict[str, str]) -> str:
-    """Deploy (or update) Cloud Run service. Returns the service URL."""
+def build_cloud_build_submit_cmd(image_tag: str) -> list[str]:
+    """Return the Cloud Build submit command."""
+    return [
+        "gcloud", "builds", "submit",
+        "--project", PROJECT_ID,
+        "--tag", image_tag,
+        ".",
+    ]
+
+
+def cloud_build_submit(image_tag: str) -> None:
+    """Build and push the image remotely via Cloud Build."""
+    run(build_cloud_build_submit_cmd(image_tag))
+
+
+def build_cloud_run_deploy_cmd(image_tag: str, env_vars: dict[str, str]) -> list[str]:
+    """Return the Cloud Run deploy command."""
     env_string = ",".join(f"{k}={v}" for k, v in env_vars.items())
-
     cmd = [
         "gcloud", "run", "deploy", SERVICE_NAME,
         "--image", image_tag,
@@ -175,14 +215,43 @@ def cloud_run_deploy(image_tag: str, env_vars: dict[str, str]) -> str:
         cmd.append("--cpu-boost")
     if env_string:
         cmd.extend(["--set-env-vars", env_string])
+    return cmd
 
-    result = run(cmd, capture=True)
+
+def cloud_run_deploy(image_tag: str, env_vars: dict[str, str]) -> str:
+    """Deploy (or update) Cloud Run service. Returns the service URL."""
+    result = run(build_cloud_run_deploy_cmd(image_tag, env_vars), capture=True)
     service_url = (result.stdout or "").strip()
     return service_url
 
 
-def main() -> None:
-    dry_run = "--dry-run" in sys.argv
+def build_image_tag(*, timestamp: int | None = None) -> str:
+    """Return a versioned Artifact Registry image tag."""
+    tag_ts = timestamp if timestamp is not None else int(time.time())
+    return f"{IMAGE_NAME}:v{tag_ts}"
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    """Parse CLI args for deployment mode selection."""
+    parser = argparse.ArgumentParser(description="Deploy Branham LLM API to Cloud Run.")
+    parser.add_argument(
+        "--build-mode",
+        choices=BUILD_MODES,
+        default="local",
+        help="How to build/push the container image.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the selected deployment plan without executing it.",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    args = parse_args(argv)
+    dry_run = args.dry_run
+    build_mode = args.build_mode
 
     project_root = Path(__file__).resolve().parent.parent
     os.chdir(project_root)
@@ -193,6 +262,7 @@ def main() -> None:
     print(f"Project:    {PROJECT_ID}")
     print(f"Region:     {REGION}")
     print(f"Service:    {SERVICE_NAME}")
+    print(f"Build mode: {build_mode}")
     print(f"Memory:     {MEMORY}")
     print(f"CPU:        {CPU}")
     print(f"Scaling:    {MIN_INSTANCES}–{MAX_INSTANCES} instances")
@@ -201,7 +271,7 @@ def main() -> None:
 
     # 0) Auth + APIs
     ensure_gcloud_auth()
-    ensure_apis()
+    ensure_apis(build_mode)
 
     # 1) Load .env
     env_vars = load_env_vars(project_root / ".env")
@@ -210,29 +280,40 @@ def main() -> None:
         print(f"  {k} = {env_vars[k][:8]}...")
 
     # 3) Build image tag
-    timestamp = int(time.time())
-    image_tag = f"{IMAGE_NAME}:v{timestamp}"
+    image_tag = build_image_tag()
     print(f"\nImage tag: {image_tag}")
 
     if dry_run:
-        print("\n[DRY RUN] Would build, push, and deploy. Exiting.")
+        if build_mode == "local":
+            print("\n[DRY RUN] Would run local Docker build/push, then deploy.")
+        else:
+            print("\n[DRY RUN] Would run Cloud Build submit, then deploy.")
         return
 
     # 2) Ensure Artifact Registry (only when actually deploying)
     ensure_artifact_registry()
 
     print("\n" + "=" * 70)
-    print("STEP 1: Building Docker image (this may take several minutes)")
+    if build_mode == "local":
+        print("STEP 1: Building Docker image locally (this may take several minutes)")
+    else:
+        print("STEP 1: Building image via Cloud Build (this may take several minutes)")
     print("=" * 70)
-    docker_build(image_tag)
+    if build_mode == "local":
+        docker_build(image_tag)
+
+        print("\n" + "=" * 70)
+        print("STEP 2: Pushing image to Artifact Registry")
+        print("=" * 70)
+        docker_push(image_tag)
+    else:
+        cloud_build_submit(image_tag)
 
     print("\n" + "=" * 70)
-    print("STEP 2: Pushing image to Artifact Registry")
-    print("=" * 70)
-    docker_push(image_tag)
-
-    print("\n" + "=" * 70)
-    print("STEP 3: Deploying to Cloud Run")
+    if build_mode == "local":
+        print("STEP 3: Deploying to Cloud Run")
+    else:
+        print("STEP 2: Deploying to Cloud Run")
     print("=" * 70)
     service_url = cloud_run_deploy(image_tag, env_vars)
 

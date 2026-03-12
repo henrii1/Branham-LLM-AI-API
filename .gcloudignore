@@ -43,9 +43,12 @@ data/benchmarks/**
 data/experiments/**
 data/logs/**
 data/training/**
+data/indices_old/**
 data/processed/**
+!data/processed/
 !data/processed/chunks.sqlite
 data/indices/**
+!data/indices/
 !data/indices/bm25.index
 !data/indices/bm25_doc_map.jsonl
 !data/indices/bm25_meta.json
@@ -54,6 +57,7 @@ data/indices/**
 !data/indices/faiss_id_map.jsonl
 !data/indices/faiss_meta.json
 data/reference/**
+!data/reference/
 !data/reference/biography.txt
 
 # HF cache stays out of the upload; Dockerfile builds its own image-local cache.

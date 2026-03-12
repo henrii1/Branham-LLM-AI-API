@@ -111,6 +111,42 @@ def validate_required_runtime_files(project_root: Path) -> None:
         )
 
 
+def list_cloudbuild_upload_files() -> set[str]:
+    """Return the file paths that gcloud will upload for Cloud Build."""
+    result = run(
+        ["gcloud", "meta", "list-files-for-upload"],
+        capture=True,
+    )
+    return {
+        line.strip()
+        for line in (result.stdout or "").splitlines()
+        if line.strip()
+    }
+
+
+def validate_cloudbuild_upload_files(project_root: Path) -> None:
+    """
+    Fail fast when .gcloudignore excludes runtime artifacts required by Dockerfile.
+
+    Local file existence is not enough for Cloud Build; the files must also be part
+    of the uploaded source context.
+    """
+    _ = project_root  # cwd is already set to project_root in main()
+    upload_files = list_cloudbuild_upload_files()
+    missing = [
+        rel_path for rel_path in REQUIRED_RUNTIME_FILES
+        if rel_path not in upload_files
+    ]
+    if missing:
+        formatted = "\n".join(f"  - {rel_path}" for rel_path in missing)
+        raise FileNotFoundError(
+            "Cloud Build source upload is missing runtime artifacts required by Dockerfile.\n"
+            "These files exist locally but are excluded from the uploaded build context.\n"
+            "Check .gcloudignore re-include rules.\n"
+            f"{formatted}"
+        )
+
+
 def ensure_gcloud_auth() -> None:
     """Verify gcloud is authenticated and project is set."""
     result = run(
@@ -310,6 +346,8 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     # 2) Validate deployment-critical files before any build starts.
     validate_required_runtime_files(project_root)
+    if build_mode == "cloudbuild":
+        validate_cloudbuild_upload_files(project_root)
 
     # 3) Build image tag
     image_tag = build_image_tag()

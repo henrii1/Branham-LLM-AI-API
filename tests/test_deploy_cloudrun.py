@@ -71,6 +71,20 @@ def test_validate_required_runtime_files_raises_for_missing_artifacts(tmp_path):
     assert "data/indices/bm25.index" in str(exc_info.value)
 
 
+def test_validate_cloudbuild_upload_files_raises_for_excluded_artifacts(monkeypatch, tmp_path):
+    module = _load_module()
+    monkeypatch.setattr(
+        module,
+        "list_cloudbuild_upload_files",
+        lambda: {"Dockerfile", "config/default.yaml"},
+    )
+    with pytest.raises(FileNotFoundError) as exc_info:
+        module.validate_cloudbuild_upload_files(tmp_path)
+    msg = str(exc_info.value)
+    assert "Cloud Build source upload is missing runtime artifacts" in msg
+    assert "data/indices/bm25.index" in msg
+
+
 def test_main_routes_local_mode_without_cloudbuild(monkeypatch):
     module = _load_module()
     calls: list[tuple[str, object]] = []
@@ -105,6 +119,7 @@ def test_main_routes_cloudbuild_mode_without_local_docker(monkeypatch):
     monkeypatch.setattr(module, "ensure_apis", lambda mode: calls.append(("apis", mode)))
     monkeypatch.setattr(module, "load_env_vars", lambda path: {"X": "1"})
     monkeypatch.setattr(module, "validate_required_runtime_files", lambda project_root: calls.append(("validate", project_root)))
+    monkeypatch.setattr(module, "validate_cloudbuild_upload_files", lambda project_root: calls.append(("validate_upload", project_root)))
     monkeypatch.setattr(module, "ensure_artifact_registry", lambda: calls.append(("repo", None)))
     monkeypatch.setattr(module, "docker_build", lambda tag: calls.append(("docker_build", tag)))
     monkeypatch.setattr(module, "docker_push", lambda tag: calls.append(("docker_push", tag)))
@@ -117,6 +132,7 @@ def test_main_routes_cloudbuild_mode_without_local_docker(monkeypatch):
 
     assert ("apis", "cloudbuild") in calls
     assert any(name == "validate" for name, _ in calls)
+    assert any(name == "validate_upload" for name, _ in calls)
     assert any(name == "cloud_build" for name, _ in calls)
     assert not any(name == "docker_build" for name, _ in calls)
     assert not any(name == "docker_push" for name, _ in calls)

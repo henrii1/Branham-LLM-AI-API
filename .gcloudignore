@@ -1,0 +1,60 @@
+# Keep Cloud Build upload lean, but include all runtime artifacts required by Dockerfile.
+
+# VCS / IDE
+.git
+.gitignore
+.cursor/
+.vscode/
+.idea/
+.DS_Store
+
+# Python cache / local envs
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.eggs/
+*.egg-info/
+
+# Secrets / local-only config
+.env
+.env.*
+config/local.yaml
+config/secrets.yaml
+
+# Large non-runtime directories
+training/
+datasets/ingest/
+datasets/export/
+datasets/raw/
+models/
+tests/
+
+# Logs / temp
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+
+# Exclude large data by default, then re-include exact runtime assets.
+data/raw/**
+data/benchmarks/**
+data/experiments/**
+data/logs/**
+data/training/**
+data/processed/**
+!data/processed/chunks.sqlite
+data/indices/**
+!data/indices/bm25.index
+!data/indices/bm25_doc_map.jsonl
+!data/indices/bm25_meta.json
+!data/indices/bm25_vocab.json
+!data/indices/faiss.index
+!data/indices/faiss_id_map.jsonl
+!data/indices/faiss_meta.json
+data/reference/**
+!data/reference/biography.txt
+
+# HF cache stays out of the upload; Dockerfile builds its own image-local cache.
+.hf-cache/

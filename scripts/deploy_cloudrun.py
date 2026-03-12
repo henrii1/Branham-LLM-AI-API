@@ -56,6 +56,21 @@ PORT = 8080
 # Startup budget: model warm ≈ 30s + uvicorn boot ≈ 5s + buffer
 STARTUP_CPU_BOOST = True
 BUILD_MODES = ("local", "cloudbuild")
+REQUIRED_RUNTIME_FILES = (
+    "Dockerfile",
+    "docker/entrypoint.sh",
+    "config/default.yaml",
+    "scripts/prefetch_hf_model.py",
+    "data/indices/bm25.index",
+    "data/indices/bm25_doc_map.jsonl",
+    "data/indices/bm25_meta.json",
+    "data/indices/bm25_vocab.json",
+    "data/indices/faiss.index",
+    "data/indices/faiss_id_map.jsonl",
+    "data/indices/faiss_meta.json",
+    "data/processed/chunks.sqlite",
+    "data/reference/biography.txt",
+)
 
 
 def run(cmd: list[str], *, check: bool = True, capture: bool = False) -> subprocess.CompletedProcess:
@@ -80,6 +95,20 @@ def load_env_vars(env_path: Path) -> dict[str, str]:
         if key:
             env_vars[key] = value
     return env_vars
+
+
+def validate_required_runtime_files(project_root: Path) -> None:
+    """Fail fast when deployment-critical runtime artifacts are missing."""
+    missing = [
+        rel_path for rel_path in REQUIRED_RUNTIME_FILES
+        if not (project_root / rel_path).exists()
+    ]
+    if missing:
+        formatted = "\n".join(f"  - {rel_path}" for rel_path in missing)
+        raise FileNotFoundError(
+            "Missing runtime deployment artifacts required by Dockerfile/Cloud Run:\n"
+            f"{formatted}"
+        )
 
 
 def ensure_gcloud_auth() -> None:
@@ -278,6 +307,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     print(f"\nLoaded {len(env_vars)} env vars from .env")
     for k in sorted(env_vars.keys()):
         print(f"  {k} = {env_vars[k][:8]}...")
+
+    # 2) Validate deployment-critical files before any build starts.
+    validate_required_runtime_files(project_root)
 
     # 3) Build image tag
     image_tag = build_image_tag()

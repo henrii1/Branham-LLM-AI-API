@@ -76,9 +76,10 @@ def test_build_system_prompt_includes_enforced_reference_policies() -> None:
     prompt = build_system_prompt(
         refusal_message="I can only answer questions based on William Branham's sermons. I don't have enough relevant information to answer your question."
     )
-    assert "no 12a/12b/etc" in prompt
+    assert "same canonical format" in prompt
     assert "Unverified / External Information" in prompt
     assert "The Table" in prompt
+    assert "recent chat history and conversation summary" in prompt
 
 
 def test_build_system_prompt_appends_runtime_addendum() -> None:

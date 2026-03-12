@@ -120,10 +120,10 @@ def main() -> None:
         default=None,
         help="Embedding model id (HF). Required.",
     )
-    parser.add_argument("--dim", type=int, default=512, help="Embedding dim (MRL truncation target).")
+    parser.add_argument("--dim", type=int, default=1024, help="Embedding dim (MRL truncation target).")
     parser.add_argument("--dtype", type=str, default="fp16", help="fp16/bf16/fp32")
     parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--max-length", type=int, default=8192)
+    parser.add_argument("--max-length", type=int, default=32768)
     parser.add_argument(
         "--pooling",
         type=str,

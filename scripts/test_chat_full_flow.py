@@ -374,7 +374,7 @@ def _run_full_flow(
         "bm25_hit_count": retrieval_result.bm25_hit_count,
         "dense_hit_count": retrieval_result.dense_hit_count,
         "fused_hit_count": retrieval_result.fused_hit_count,
-        "sermon_count": len(retrieval_result.expanded_sermons),
+        "sermon_count": len(retrieval_result.all_expanded_sermons),
         "total_chunks": retrieval_result.total_chunks,
         "signals": asdict(retrieval_result.signals),
         "refusal_thresholds": {
@@ -400,7 +400,7 @@ def _run_full_flow(
     # LLM context preserves the metadata-rich format used in production.
     import concurrent.futures
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-        rag_ui_f = pool.submit(build_rag_context, retrieval_result.expanded_sermons, audience="ui")
+        rag_ui_f = pool.submit(build_rag_context, retrieval_result.all_expanded_sermons, audience="ui")
         rag_llm_f = pool.submit(build_rag_context, retrieval_result.expanded_sermons, audience="llm")
         rag_context_ui = rag_ui_f.result()
         rag_context_llm = rag_llm_f.result()
@@ -451,20 +451,22 @@ def _run_full_flow(
     run_report["tool_limit_events"] = tool_limit_events
     run_report["llm_tool_call_trace"] = _summarize_llm_tool_calls(loop_result.llm_traces)
     run_report["postcheck"] = {"mode": checked.mode, "issues": checked.issues}
+    summary_result = (
+        runtime.summarize_conversation(
+            query=request.query,
+            answer=checked.answer,
+            prior_summary=request.conversation_summary,
+            mode=checked.mode,
+        )
+        if hasattr(runtime, "summarize_conversation")
+        else {"conversation_summary": None, "query_summary": None}
+    )
     run_report["final"] = {
         "mode": checked.mode,
         "answer": checked.answer,
         "external_info": checked.external_info,
-        "conversation_summary_out": (
-            runtime.summarize_conversation(
-                query=request.query,
-                answer=checked.answer,
-                prior_summary=request.conversation_summary,
-                mode=checked.mode,
-            )
-            if hasattr(runtime, "summarize_conversation")
-            else None
-        ),
+        "conversation_summary_out": summary_result["conversation_summary"],
+        "query_summary_out": summary_result["query_summary"],
     }
     return run_report
 

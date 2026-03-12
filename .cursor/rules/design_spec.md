@@ -335,6 +335,7 @@ Post-LLM behavior:
 
 System prompt must guide the model to:
 - Answer ONLY using the provided sermon context.
+- When the latest user turn is unclear or uses pronouns/deictic follow-ups (for example: "it", "that", "this", "they", "he", "those"), resolve them against the recent chat history and `conversation_summary` unless the current turn clearly defines another referent.
 - If context does not support the answer, output the fixed refusal message.
 - Never answer generic questions unrelated to Branham sermons.
 - Always include references:
@@ -626,9 +627,25 @@ Response fields:
 **Streaming contract**:
 - API must stream **all** responses via SSE, including early refusal/off-topic responses.
 - Tool-call internals remain server-side; client receives progressive answer/refusal events and final metadata.
+- SSE event sequence/shape:
+  - `start`: `{ conversation_id }`
+  - `rag`: `{ retrieval_query, rag_context, retrieval }` for non-early-refusal paths, where `retrieval` includes refusal flags, hit counts, sermon count, total chunk count, reranker flag, and retrieval signals
+  - `delta`: `{ text }` incremental answer/refusal text chunks
+  - `final`: `{ mode, answer, external_info, conversation_summary, query_summary }`
+  - `done`: `{ ok }`
 
 ### 15.2 GET /health
 - readiness check: indices available + vLLM services healthy + LiteLLM configured
+- Response shape:
+  - `status` (`"healthy"`)
+  - `ready` (boolean)
+  - `checks` object including at least:
+    - `bearer_key_configured`
+    - `retrieval_pipeline_loaded`
+    - `tool_registry_loaded`
+    - `llm_client_loaded`
+    - `llm_key_count`
+  - optional `error` string when startup/readiness checks fail
 
 ---
 

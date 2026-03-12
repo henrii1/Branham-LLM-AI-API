@@ -380,19 +380,51 @@ class ChatRuntime:
         answer: str,
         prior_summary: str | None,
         mode: str,
-    ) -> str | None:
+    ) -> dict[str, str | None]:
+        """Return {"conversation_summary": ..., "query_summary": ...}.
+
+        On the first query (no prior_summary), both fields are generated in a
+        single LLM call.  On follow-up queries only conversation_summary is
+        produced; query_summary is None.
+        """
+        empty = {"conversation_summary": prior_summary or None, "query_summary": None}
         if not query.strip() or not answer.strip():
-            return prior_summary or None
-        summary_instruction = (
-            "Create a compact conversation summary for frontend memory handoff.\n"
-            "Rules:\n"
-            "- Output plain text only (no markdown).\n"
-            "- Ensure that the summary is rich as it will be fed into a sermon retrieval system\n"
-            "- Keep the same language as the ai respons to user's query\n"
-            "- keep it concise but relevant to assist the next query retrieve the best context from Rag, we send new query + summary into RAG\n"
-            f"- Final mode was: {mode}.\n"
-            "- If refusal, summarize why briefly.\n"
-        )
+            return empty
+
+        is_first_query = not (prior_summary or "").strip()
+
+        if is_first_query:
+            summary_instruction = (
+                "You will receive a user query and an AI answer. Produce a JSON object with exactly two keys:\n"
+                "1. \"conversation_summary\": A compact conversation summary for frontend memory handoff.\n"
+                "2. \"query_summary\": A 5–7 word title/summary of the user's first query.\n\n"
+                "Rules for conversation_summary:\n"
+                "- Plain text only (no markdown).\n"
+                "- Rich enough to feed into a sermon retrieval system for the next query.\n"
+                "- Same language as the AI response.\n"
+                "- Concise but relevant.\n"
+                f"- Final mode was: {mode}.\n"
+                "- If refusal, summarize why briefly.\n\n"
+                "Rules for query_summary:\n"
+                "- Exactly 5–7 words.\n"
+                "- Captures the essence of what the user asked.\n"
+                "- Plain text only, no markdown or special characters.\n\n"
+                "Output ONLY a valid JSON object. No markdown, no code fences, no extra text.\n"
+            )
+            max_tokens = 180
+        else:
+            summary_instruction = (
+                "Create a compact conversation summary for frontend memory handoff.\n"
+                "Rules:\n"
+                "- Output plain text only (no markdown).\n"
+                "- Ensure that the summary is rich as it will be fed into a sermon retrieval system\n"
+                "- Keep the same language as the ai respons to user's query\n"
+                "- keep it concise but relevant to assist the next query retrieve the best context from Rag, we send new query + summary into RAG\n"
+                f"- Final mode was: {mode}.\n"
+                "- If refusal, summarize why briefly.\n"
+            )
+            max_tokens = 120
+
         user_payload = (
             f"Prior summary:\n{prior_summary or '[none]'}\n\n"
             f"User query:\n{query}\n\n"
@@ -404,13 +436,29 @@ class ChatRuntime:
                     {"role": "system", "content": summary_instruction},
                     {"role": "user", "content": user_payload},
                 ],
-                max_tokens=120,
+                max_tokens=max_tokens,
             )
             content = (resp.choices[0].message.content or "").strip()
-            return content or (prior_summary or None)
+
+            if is_first_query:
+                clean = content
+                if clean.startswith("```"):
+                    clean = "\n".join(
+                        ln for ln in clean.splitlines()
+                        if not ln.strip().startswith("```")
+                    ).strip()
+                data = json.loads(clean)
+                return {
+                    "conversation_summary": str(data.get("conversation_summary") or "").strip() or (prior_summary or None),
+                    "query_summary": str(data.get("query_summary") or "").strip() or None,
+                }
+            return {
+                "conversation_summary": content or (prior_summary or None),
+                "query_summary": None,
+            }
         except Exception as exc:
             logger.warning("Conversation summary generation failed: %s", exc)
-            return prior_summary or None
+            return empty
 
 
 @dataclass
@@ -640,19 +688,29 @@ def _safe_conversation_summary(
     mode: str,
     answer: str,
     fallback: str | None = None,
-) -> str | None:
+) -> dict[str, str | None]:
+    """Return {"conversation_summary": ..., "query_summary": ...}."""
+    empty = {"conversation_summary": fallback, "query_summary": None}
     if not hasattr(runtime, "summarize_conversation"):
-        return fallback
+        return empty
     try:
-        return runtime.summarize_conversation(
+        result = runtime.summarize_conversation(
             query=request.query,
             answer=answer,
             prior_summary=request.conversation_summary,
             mode=mode,
         )
+        if isinstance(result, dict):
+            return {
+                "conversation_summary": result.get("conversation_summary"),
+                "query_summary": result.get("query_summary"),
+            }
+        if isinstance(result, str):
+            return {"conversation_summary": result or fallback, "query_summary": None}
+        return empty
     except Exception as exc:
         logger.warning("conversation summary call failed: %s", exc)
-        return fallback
+        return empty
 
 
 def _generate_allowed_query_fallback(
@@ -804,6 +862,7 @@ async def chat(
                     "answer": final_text,
                     "external_info": None,
                     "conversation_summary": None,
+                    "query_summary": None,
                 },
             )
             yield _sse_event("done", {"ok": True})
@@ -842,6 +901,7 @@ async def chat(
                         "answer": refusal,
                         "external_info": None,
                         "conversation_summary": None,
+                        "query_summary": None,
                     },
                 )
                 yield _sse_event("done", {"ok": True})
@@ -854,6 +914,11 @@ async def chat(
 
             # Emit UI RAG context as soon as it's ready to hide downstream latency.
             # Build the LLM RAG context concurrently (we need it before starting the LLM call).
+            all_expanded_sermons = getattr(
+                retrieval_result,
+                "all_expanded_sermons",
+                retrieval_result.expanded_sermons,
+            )
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                 rag_llm_f = pool.submit(
                     build_rag_context,
@@ -861,7 +926,7 @@ async def chat(
                     audience="llm",
                 )
                 rag_context_ui = build_rag_context(
-                    retrieval_result.expanded_sermons,
+                    all_expanded_sermons,
                     audience="ui",
                 )
             yield _sse_event(
@@ -875,7 +940,7 @@ async def chat(
                         "bm25_hit_count": retrieval_result.bm25_hit_count,
                         "dense_hit_count": retrieval_result.dense_hit_count,
                         "fused_hit_count": retrieval_result.fused_hit_count,
-                        "sermon_count": len(retrieval_result.expanded_sermons),
+                        "sermon_count": len(all_expanded_sermons),
                         "total_chunks": retrieval_result.total_chunks,
                         "reranker_triggered": retrieval_result.reranker_triggered,
                         "signals": {
@@ -1142,7 +1207,7 @@ async def chat(
                     query=request.query,
                     checked=checked,
                 )
-                summary = _safe_conversation_summary(
+                summary_result = _safe_conversation_summary(
                     runtime=runtime,
                     request=request,
                     mode=checked.mode,
@@ -1169,7 +1234,8 @@ async def chat(
                         "mode": checked.mode,
                         "answer": checked.answer,
                         "external_info": checked.external_info,
-                        "conversation_summary": summary,
+                        "conversation_summary": summary_result["conversation_summary"],
+                        "query_summary": summary_result["query_summary"],
                     },
                 )
                 yield _sse_event("done", {"ok": True})
@@ -1188,6 +1254,7 @@ async def chat(
                     "answer": "Request could not be processed.",
                     "external_info": None,
                     "conversation_summary": None,
+                    "query_summary": None,
                 },
             )
             yield _sse_event("done", {"ok": False})
@@ -1195,7 +1262,7 @@ async def chat(
 
         except (LiteLLMRateLimitError, LiteLLMServiceUnavailableError):
             refusal = SERVICE_UNAVAILABLE_MESSAGE
-            summary = _safe_conversation_summary(
+            summary_result = _safe_conversation_summary(
                 runtime=runtime,
                 request=request,
                 mode="refusal",
@@ -1209,7 +1276,8 @@ async def chat(
                     "mode": "refusal",
                     "answer": refusal,
                     "external_info": None,
-                    "conversation_summary": summary,
+                    "conversation_summary": summary_result["conversation_summary"],
+                    "query_summary": summary_result["query_summary"],
                 },
             )
             yield _sse_event("done", {"ok": True})

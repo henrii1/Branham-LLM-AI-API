@@ -164,13 +164,14 @@ class RetrievalResult:
 
     # Results
     sermon_groups: list[SermonGroup]  # After collation, before expansion
-    expanded_sermons: list[ExpandedSermon]  # After expansion
+    expanded_sermons: list[ExpandedSermon]  # Top-N for LLM (capped at max_sermons)
+    all_expanded_sermons: list[ExpandedSermon]  # Full deduped set for UI/frontend
 
     # Metadata
     bm25_hit_count: int
     dense_hit_count: int
     fused_hit_count: int
-    total_chunks: int  # After expansion
+    total_chunks: int  # After expansion (LLM set)
 
     # Refusal
     should_refuse: bool
@@ -574,7 +575,7 @@ class RAGPipeline:
         expanded_sermons: list[ExpandedSermon] = []
         total_chunks = 0
 
-        # Get all chunks from selected sermons
+        # Get all chunks from selected sermons (top-N for LLM)
         all_sermon_chunks: list[FusedHit] = []
         for group in sermon_groups:
             all_sermon_chunks.extend(group.chunks)
@@ -588,28 +589,44 @@ class RAGPipeline:
             all_sermon_chunks,
             self.chunk_store,
             delta=delta,
-            sermon_order=sermon_order,  # Preserve composite score ranking
+            sermon_order=sermon_order,
         )
 
         # Count total chunks
         total_chunks = sum(len(s.chunks) for s in expanded_sermons)
 
+        # 8b. Build full (uncapped) expansion for frontend/UI.
+        # The UI gets ALL deduped fused results, not just the top-N sent to the LLM.
+        all_sermon_groups = collate_by_sermon(fused_hits, max_sermons=len(fused_hits))
+        all_ui_chunks: list[FusedHit] = []
+        for group in all_sermon_groups:
+            all_ui_chunks.extend(group.chunks)
+        all_ui_order = [g.date_id for g in all_sermon_groups]
+        all_expanded_sermons = expand_and_group(
+            all_ui_chunks,
+            self.chunk_store,
+            delta=0,
+            sermon_order=all_ui_order,
+        )
+
         total_elapsed = (time.perf_counter() - total_start) * 1000
-        
+
         if should_refuse:
             logger.warning(f"REFUSING: {refuse_reason}")
         else:
             logger.info(
-                f"Expansion: {len(expanded_sermons)} sermons, {total_chunks} total chunks"
+                f"Expansion: {len(expanded_sermons)} sermons (LLM), "
+                f"{len(all_expanded_sermons)} sermons (UI), "
+                f"{total_chunks} LLM chunks"
             )
-        
+
         logger.info(
             f"=== RETRIEVE DONE in {total_elapsed:.1f}ms: "
             f"bm25={len(bm25_hits)}, dense={len(dense_hits)}, fused={len(fused_hits)}, "
             f"reranked={reranker_triggered}, sermons={len(sermon_groups)}, "
             f"refuse={should_refuse} ==="
         )
-        
+
         return RetrievalResult(
             query=query,
             query_normalized=query_normalized,
@@ -618,6 +635,7 @@ class RAGPipeline:
             reranker_triggered=reranker_triggered,
             sermon_groups=sermon_groups,
             expanded_sermons=expanded_sermons,
+            all_expanded_sermons=all_expanded_sermons,
             bm25_hit_count=len(bm25_hits),
             dense_hit_count=len(dense_hits),
             fused_hit_count=len(fused_hits),

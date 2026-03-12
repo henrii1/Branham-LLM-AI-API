@@ -72,6 +72,10 @@ _COMPARISON_KEYWORDS = (
     "similarities between",
 )
 
+_REF_BULLET_PATTERN = re.compile(
+    r"^\s*[-*]\s*\[(.+?)\s*[—–-]+\s*(\d{2}-\d{4}[A-Z]?):\s*(.+?)\]\s*$"
+)
+
 UNVERIFIED_SECTION_HEADER = "## Unverified / External Information"
 _NON_COMPLIANT_REFUSAL_PATTERNS = (
     "provided rag context",
@@ -259,6 +263,89 @@ def _strip_internal_mechanics_language(answer: str) -> tuple[str, bool]:
     return text, (text != original)
 
 
+def _normalize_leading_answer_header(answer: str) -> tuple[str, bool]:
+    """
+    Normalize model-styled first-line Answer headers to the exact contract form.
+
+    Example:
+      **Answer:** -> Answer:
+    """
+    text = answer or ""
+    normalized = re.sub(
+        r"(?im)\A\s*\*{1,2}\s*Answer:\s*\*{1,2}\s*(?:\r?\n)?",
+        "Answer:\n\n",
+        text,
+        count=1,
+    )
+    return normalized, (normalized != text)
+
+
+def _merge_sermon_references(answer: str) -> str:
+    """Merge references to the same sermon into one line with comma-separated paragraph ranges.
+
+    Before:
+      - [THE SERPENT'S SEED — 58-0928E: ¶157–¶163]
+      - [THE SERPENT'S SEED — 58-0928E: ¶164–¶171]
+    After:
+      - [THE SERPENT'S SEED — 58-0928E: ¶157–¶163, ¶164–¶171]
+    """
+    lines = answer.split("\n")
+
+    ref_header_idx = None
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if re.match(r"^#{0,6}\s*References:\s*$", stripped, re.IGNORECASE):
+            ref_header_idx = i
+            break
+
+    if ref_header_idx is None:
+        return answer
+
+    ref_end_idx = len(lines)
+    for i in range(ref_header_idx + 1, len(lines)):
+        stripped = lines[i].strip()
+        if not stripped:
+            continue
+        if stripped.startswith("#") or re.match(r"(?i)^#{0,6}\s*reader\s+note", stripped):
+            ref_end_idx = i
+            break
+
+    sermon_groups: dict[tuple[str, str], list[str]] = {}
+    sermon_order: list[tuple[str, str]] = []
+    parsed_count = 0
+
+    for i in range(ref_header_idx + 1, ref_end_idx):
+        m = _REF_BULLET_PATTERN.match(lines[i])
+        if m:
+            title = m.group(1).strip()
+            date_id = m.group(2).strip()
+            para_range = m.group(3).strip()
+            key = (title, date_id)
+            if key not in sermon_groups:
+                sermon_groups[key] = []
+                sermon_order.append(key)
+            for pr in para_range.split(","):
+                pr = pr.strip()
+                if pr:
+                    sermon_groups[key].append(pr)
+            parsed_count += 1
+
+    if not sermon_groups:
+        return answer
+
+    total_ranges = sum(len(v) for v in sermon_groups.values())
+    if total_ranges == len(sermon_groups) and parsed_count == len(sermon_groups):
+        return answer
+
+    merged_bullets = []
+    for key in sermon_order:
+        title, date_id = key
+        merged_bullets.append(f"- [{title} — {date_id}: {', '.join(sermon_groups[key])}]")
+
+    result_lines = lines[: ref_header_idx + 1] + merged_bullets + [""] + lines[ref_end_idx:]
+    return "\n".join(result_lines)
+
+
 @dataclass
 class PostcheckResult:
     mode: str
@@ -283,6 +370,7 @@ def finalize_answer(
     _ = query  # kept for signature stability
     text = (answer or "").strip()
     text, removed_internal_language = _strip_internal_mechanics_language(text)
+    text, normalized_answer_header = _normalize_leading_answer_header(text)
 
     # Normalize model-produced refusal variants to the fixed refusal contract.
     if not external_info:
@@ -314,10 +402,19 @@ def finalize_answer(
     if not has_sermon_reference(text):
         text = _strip_non_sermon_sections(text)
 
+    text = _merge_sermon_references(text)
+
     return PostcheckResult(
         mode="answer",
         answer=text,
         external_info=external_info,
-        issues=(["removed_internal_mechanics_language"] if removed_internal_language else []),
+        issues=[
+            *(
+                ["removed_internal_mechanics_language"]
+                if removed_internal_language
+                else []
+            ),
+            *(["normalized_answer_header"] if normalized_answer_header else []),
+        ],
     )
 

@@ -387,10 +387,12 @@ def test_tool_loop_runner_returns_tool_limit_output_without_raising() -> None:
 
 def test_tool_registry_total_limit_enforced() -> None:
     registry = ToolRegistry([ToolSpec(tool=_DummyTool(), max_calls=10)], max_total_calls=2)
+    registry.begin_tool_round()
     assert registry.execute_tool("dummy_tool", {})["ok"] is True
+    registry.begin_tool_round()
     assert registry.execute_tool("dummy_tool", {})["ok"] is True
     with pytest.raises(ToolLimitError):
-        registry.execute_tool("dummy_tool", {})
+        registry.begin_tool_round()
 
 
 class _DbSearchSuffixLLM:

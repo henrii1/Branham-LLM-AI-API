@@ -72,6 +72,9 @@ class Chunk:
     text: str
     word_count: int
     char_count: int
+    sermon_title: str
+    text_with_metadata: str
+    is_tail_chunk: int
 
 
 @dataclass
@@ -105,6 +108,24 @@ def count_words(text: str) -> int:
     """
     # NOTE: This is intentionally simple; it matches the spec: "Use word count (not tokenizer)".
     return len([w for w in text.split() if w.strip()])
+
+
+def build_text_with_metadata(
+    *,
+    sermon_title: str,
+    date_id: str,
+    paragraph_start: str,
+    paragraph_end: str,
+    text: str,
+) -> str:
+    """
+    Build the composite text used by BM25/FAISS indexing.
+    """
+    title = sermon_title or "Unknown"
+    return (
+        f"[Sermon: {title} | ID: {date_id} | ¶{paragraph_start}-{paragraph_end}]\n"
+        f"{text}"
+    )
 
 
 # NOTE:
@@ -241,6 +262,7 @@ def split_text_to_budget_strict(text: str, target_words: int, min_words_needed: 
 def _pack_paragraphs_into_chunks_core(
     paragraphs: List[Paragraph],
     date_id: str,
+    sermon_title: str,
     *,
     allow_final_under_min: bool,
 ) -> List[Chunk]:
@@ -531,18 +553,30 @@ def _pack_paragraphs_into_chunks_core(
 
     # Convert unit chunks → stored Chunk rows.
     chunks: List[Chunk] = []
+    last_chunk_index = len(built_unit_chunks) - 1
     for idx, unit_chunk in enumerate(built_unit_chunks):
         chunk_text = "\n".join(u.text for u in unit_chunk).strip()
+        paragraph_start = unit_chunk[0].ref
+        paragraph_end = unit_chunk[-1].ref
         chunks.append(
             Chunk(
                 chunk_id=f"{date_id}_chunk_{idx}",
                 date_id=date_id,
-                paragraph_start=unit_chunk[0].ref,
-                paragraph_end=unit_chunk[-1].ref,
+                paragraph_start=paragraph_start,
+                paragraph_end=paragraph_end,
                 chunk_index=idx,
                 text=chunk_text,
                 word_count=count_words(chunk_text),
                 char_count=len(chunk_text),
+                sermon_title=sermon_title,
+                text_with_metadata=build_text_with_metadata(
+                    sermon_title=sermon_title,
+                    date_id=date_id,
+                    paragraph_start=paragraph_start,
+                    paragraph_end=paragraph_end,
+                    text=chunk_text,
+                ),
+                is_tail_chunk=1 if idx == last_chunk_index else 0,
             )
         )
 
@@ -551,7 +585,8 @@ def _pack_paragraphs_into_chunks_core(
 
 def pack_paragraphs_into_chunks(
     paragraphs: List[Paragraph],
-    date_id: str
+    date_id: str,
+    sermon_title: str,
 ) -> List[Chunk]:
     """
     Public packer for Stage 2 chunking.
@@ -583,10 +618,24 @@ def pack_paragraphs_into_chunks(
                 text=chunk_text,
                 word_count=count_words(chunk_text),
                 char_count=len(chunk_text),
+                sermon_title=sermon_title,
+                text_with_metadata=build_text_with_metadata(
+                    sermon_title=sermon_title,
+                    date_id=date_id,
+                    paragraph_start=paragraphs[0].ref,
+                    paragraph_end=paragraphs[-1].ref,
+                    text=chunk_text,
+                ),
+                is_tail_chunk=1,
             )
         ]
 
-    return _pack_paragraphs_into_chunks_core(paragraphs, date_id, allow_final_under_min=True)
+    return _pack_paragraphs_into_chunks_core(
+        paragraphs,
+        date_id,
+        sermon_title,
+        allow_final_under_min=True,
+    )
 
 
 # ============================================================================
@@ -602,7 +651,7 @@ def create_chunks_table(conn: sqlite3.Connection):
     """
     cursor = conn.cursor()
     
-    # Create table
+    # Create table if absent.
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS chunks (
             chunk_id TEXT PRIMARY KEY,
@@ -612,9 +661,22 @@ def create_chunks_table(conn: sqlite3.Connection):
             chunk_index INTEGER,
             text TEXT,
             word_count INTEGER,
-            char_count INTEGER
+            char_count INTEGER,
+            sermon_title TEXT,
+            text_with_metadata TEXT,
+            is_tail_chunk INTEGER DEFAULT 0
         )
     ''')
+
+    # If the table already existed in an older shape, add the newer runtime columns.
+    cursor.execute("PRAGMA table_info(chunks)")
+    existing_cols = {row[1] for row in cursor.fetchall()}
+    if "sermon_title" not in existing_cols:
+        cursor.execute("ALTER TABLE chunks ADD COLUMN sermon_title TEXT")
+    if "text_with_metadata" not in existing_cols:
+        cursor.execute("ALTER TABLE chunks ADD COLUMN text_with_metadata TEXT")
+    if "is_tail_chunk" not in existing_cols:
+        cursor.execute("ALTER TABLE chunks ADD COLUMN is_tail_chunk INTEGER DEFAULT 0")
     
     # Create indexes for fast retrieval
     cursor.execute('''
@@ -626,7 +688,57 @@ def create_chunks_table(conn: sqlite3.Connection):
         CREATE INDEX IF NOT EXISTS idx_chunks_range 
         ON chunks(date_id, paragraph_start, paragraph_end)
     ''')
+
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_chunks_date_tail
+        ON chunks(date_id, is_tail_chunk)
+    ''')
     
+    conn.commit()
+
+
+def backfill_chunk_metadata(conn: sqlite3.Connection) -> None:
+    """
+    Backfill runtime chunk metadata for existing rows.
+
+    This keeps the script safe when run against an older chunks table or when only a
+    subset of sermons is reprocessed.
+    """
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        UPDATE chunks
+        SET sermon_title = (
+            SELECT s.title
+            FROM sermons s
+            WHERE s.date_id = chunks.date_id
+        )
+        WHERE sermon_title IS NULL OR sermon_title = ''
+        """
+    )
+    cursor.execute(
+        """
+        UPDATE chunks
+        SET text_with_metadata =
+            '[Sermon: ' || COALESCE(sermon_title, 'Unknown') ||
+            ' | ID: ' || date_id ||
+            ' | ¶' || paragraph_start || '-' || paragraph_end || ']' ||
+            char(10) || text
+        WHERE text_with_metadata IS NULL OR text_with_metadata = ''
+        """
+    )
+    cursor.execute("UPDATE chunks SET is_tail_chunk = 0")
+    cursor.execute(
+        """
+        UPDATE chunks
+        SET is_tail_chunk = 1
+        WHERE (date_id, chunk_index) IN (
+            SELECT date_id, MAX(chunk_index)
+            FROM chunks
+            GROUP BY date_id
+        )
+        """
+    )
     conn.commit()
 
 
@@ -696,14 +808,43 @@ def load_paragraphs_for_sermon(
     return paragraphs
 
 
+def load_sermon_title(conn: sqlite3.Connection, date_id: str) -> str:
+    """
+    Load sermon title from sermons table for metadata-enriched chunks.
+    """
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT title
+        FROM sermons
+        WHERE date_id = ?
+        """,
+        (date_id,),
+    )
+    row = cursor.fetchone()
+    if not row:
+        raise RuntimeError(f"Missing sermons row for date_id={date_id}")
+    return str(row[0] or "Unknown")
+
+
+def paragraphs_has_sermon_title_column(conn: sqlite3.Connection) -> bool:
+    """
+    Check whether the source paragraphs table already has a sermon_title column.
+    """
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA table_info(paragraphs)")
+    return any(row[1] == "sermon_title" for row in cursor.fetchall())
+
+
 def insert_chunk(conn: sqlite3.Connection, chunk: Chunk):
     """Insert a single chunk into the database."""
     cursor = conn.cursor()
     cursor.execute('''
         INSERT OR REPLACE INTO chunks (
             chunk_id, date_id, paragraph_start, paragraph_end,
-            chunk_index, text, word_count, char_count
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            chunk_index, text, word_count, char_count,
+            sermon_title, text_with_metadata, is_tail_chunk
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (
         chunk.chunk_id,
         chunk.date_id,
@@ -712,7 +853,10 @@ def insert_chunk(conn: sqlite3.Connection, chunk: Chunk):
         chunk.chunk_index,
         chunk.text,
         chunk.word_count,
-        chunk.char_count
+        chunk.char_count,
+        chunk.sermon_title,
+        chunk.text_with_metadata,
+        chunk.is_tail_chunk,
     ))
 
 
@@ -751,6 +895,7 @@ def create_single_sermon_test_db(
             paragraph_no INTEGER,
             sub_id TEXT DEFAULT '',
             text TEXT,
+            sermon_title TEXT,
             PRIMARY KEY (date_id, paragraph_no, sub_id)
         );
     ''')
@@ -765,16 +910,35 @@ def create_single_sermon_test_db(
     )
 
     # Copy paragraphs
-    rows = src.execute(
-        "SELECT date_id, paragraph_no, sub_id, text FROM paragraphs WHERE date_id = ? ORDER BY paragraph_no, sub_id",
-        (date_id,),
-    ).fetchall()
+    has_para_title = paragraphs_has_sermon_title_column(src)
+    if has_para_title:
+        rows = src.execute(
+            "SELECT date_id, paragraph_no, sub_id, text, sermon_title FROM paragraphs WHERE date_id = ? ORDER BY paragraph_no, sub_id",
+            (date_id,),
+        ).fetchall()
+    else:
+        rows = src.execute(
+            "SELECT date_id, paragraph_no, sub_id, text FROM paragraphs WHERE date_id = ? ORDER BY paragraph_no, sub_id",
+            (date_id,),
+        ).fetchall()
     if not rows:
         raise RuntimeError(f"No paragraphs found for date_id={date_id}")
 
+    paragraph_rows = []
+    for r in rows:
+        paragraph_rows.append(
+            (
+                r["date_id"],
+                r["paragraph_no"],
+                r["sub_id"] or "",
+                r["text"],
+                r["sermon_title"] if has_para_title else "",
+            )
+        )
+
     dst.executemany(
-        "INSERT INTO paragraphs(date_id, paragraph_no, sub_id, text) VALUES (?, ?, ?, ?)",
-        [(r["date_id"], r["paragraph_no"], r["sub_id"] or "", r["text"]) for r in rows],
+        "INSERT INTO paragraphs(date_id, paragraph_no, sub_id, text, sermon_title) VALUES (?, ?, ?, ?, ?)",
+        paragraph_rows,
     )
 
     # Create fresh chunks table (new Stage 2 schema)
@@ -819,6 +983,7 @@ def create_test_db_subset(
             paragraph_no INTEGER,
             sub_id TEXT DEFAULT '',
             text TEXT,
+            sermon_title TEXT,
             PRIMARY KEY (date_id, paragraph_no, sub_id)
         );
     ''')
@@ -837,16 +1002,34 @@ def create_test_db_subset(
         )
 
     # Copy paragraphs
+    has_para_title = paragraphs_has_sermon_title_column(src)
     for did in date_ids:
-        rows = src.execute(
-            "SELECT date_id, paragraph_no, sub_id, text FROM paragraphs WHERE date_id = ? ORDER BY paragraph_no, sub_id",
-            (did,),
-        ).fetchall()
+        if has_para_title:
+            rows = src.execute(
+                "SELECT date_id, paragraph_no, sub_id, text, sermon_title FROM paragraphs WHERE date_id = ? ORDER BY paragraph_no, sub_id",
+                (did,),
+            ).fetchall()
+        else:
+            rows = src.execute(
+                "SELECT date_id, paragraph_no, sub_id, text FROM paragraphs WHERE date_id = ? ORDER BY paragraph_no, sub_id",
+                (did,),
+            ).fetchall()
         if not rows:
             raise RuntimeError(f"No paragraphs found for date_id={did}")
+        paragraph_rows = []
+        for r in rows:
+            paragraph_rows.append(
+                (
+                    r["date_id"],
+                    r["paragraph_no"],
+                    r["sub_id"] or "",
+                    r["text"],
+                    r["sermon_title"] if has_para_title else "",
+                )
+            )
         dst.executemany(
-            "INSERT INTO paragraphs(date_id, paragraph_no, sub_id, text) VALUES (?, ?, ?, ?)",
-            [(r["date_id"], r["paragraph_no"], r["sub_id"] or "", r["text"]) for r in rows],
+            "INSERT INTO paragraphs(date_id, paragraph_no, sub_id, text, sermon_title) VALUES (?, ?, ?, ?, ?)",
+            paragraph_rows,
         )
 
     create_chunks_table(dst)
@@ -927,8 +1110,10 @@ def process_all_sermons(
             print(f'[{idx}/{len(all_date_ids)}] {date_id}: No paragraphs, skipping')
             continue
         
+        sermon_title = load_sermon_title(source_conn, date_id)
+
         # Pack into chunks
-        chunks = pack_paragraphs_into_chunks(paragraphs, date_id)
+        chunks = pack_paragraphs_into_chunks(paragraphs, date_id, sermon_title)
         
         # Insert chunks
         for chunk in chunks:
@@ -945,6 +1130,7 @@ def process_all_sermons(
     
     # Commit all changes
     target_conn.commit()
+    backfill_chunk_metadata(target_conn)
     
     print('='*70)
     print(f'✓ Total sermons processed: {len(all_date_ids)}')

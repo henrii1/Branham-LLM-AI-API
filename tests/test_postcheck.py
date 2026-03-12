@@ -144,6 +144,19 @@ def test_no_sermon_reference_strips_reader_note_and_na_references() -> None:
     assert "[N/A]" not in out.answer
 
 
+def test_bold_answer_header_is_normalized_to_exact_contract() -> None:
+    out = finalize_answer(
+        query="What did Brother Branham teach about faith?",
+        answer="**Answer:**\n\nHe taught this [47-0412M: ¶2–¶3].",
+        external_info=None,
+        refusal_message=REFUSAL,
+    )
+    assert out.mode == "answer"
+    assert out.answer.startswith("Answer:\n\n")
+    assert "**Answer:**" not in out.answer
+    assert "normalized_answer_header" in out.issues
+
+
 def test_is_bible_query_keyword_check() -> None:
     assert is_bible_query("Explain John 3:16") is True
     assert is_bible_query("What does Habakkuk say about faith?") is True

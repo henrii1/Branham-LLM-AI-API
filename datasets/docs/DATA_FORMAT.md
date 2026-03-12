@@ -140,10 +140,18 @@ If not present, paragraphs are generated deterministically.
 CREATE TABLE paragraphs (
   date_id TEXT,
   paragraph_no INTEGER,
+  sub_id TEXT DEFAULT '',
   text TEXT,
-  PRIMARY KEY (date_id, paragraph_no)
+  sermon_title TEXT,
+  PRIMARY KEY (date_id, paragraph_no, sub_id)
 );
 ```
+
+**Notes**:
+- `paragraph_no` remains the canonical integer paragraph number.
+- `sub_id` is an optional suffix such as `a`, `b`, `c` used only for rare continuation/split rows.
+- `sermon_title` is denormalized from `sermons.title` for paragraph-level cleanup and utility workflows.
+- Most paragraphs use `sub_id = ''`; user-facing references should still normalize back to numeric paragraph references only.
 
 ### 4.3 chunks (retrieval and grounding unit)
 
@@ -151,8 +159,8 @@ CREATE TABLE paragraphs (
 CREATE TABLE chunks (
   chunk_id TEXT PRIMARY KEY,
   date_id TEXT,
-  paragraph_start INTEGER,
-  paragraph_end INTEGER,
+  paragraph_start TEXT,
+  paragraph_end TEXT,
   chunk_index INTEGER,
   text TEXT,
   word_count INTEGER,
@@ -165,13 +173,14 @@ CREATE TABLE chunks (
 -- Indexes for fast retrieval
 CREATE INDEX idx_chunks_date ON chunks(date_id);
 CREATE INDEX idx_chunks_range ON chunks(date_id, paragraph_start, paragraph_end);
+CREATE INDEX idx_chunks_date_tail ON chunks(date_id, is_tail_chunk);
 ```
 
 **Field descriptions**:
 - `chunk_id`: Unique identifier (e.g., `47-0412M_chunk_3`)
 - `date_id`: Sermon identifier (e.g., `47-0412M` or `47-0412`)
-- `paragraph_start`: Starting paragraph number (inclusive)
-- `paragraph_end`: Ending paragraph number (inclusive)
+- `paragraph_start`: Starting paragraph reference (inclusive), stored as text so values like `15a` are allowed
+- `paragraph_end`: Ending paragraph reference (inclusive), stored as text so values like `15b` are allowed
 - `chunk_index`: Position within sermon (0 to N-1, for expansion logic)
 - `text`: The actual chunk text (raw)
 - `word_count`: Word count (for budgeting and analysis)
@@ -223,7 +232,9 @@ If a single paragraph exceeds `HARD_MAX` words:
 ¶23b
 ```
 
-These are stored as separate rows in the `paragraphs` table but still part of the same `date_id`.
+The pipeline supports these suffix identifiers in references. In practice:
+- Stage 1 may store rare suffix-bearing rows in `paragraphs.sub_id`
+- Stage 2 may also create synthetic suffix refs for chunk boundaries without rewriting the canonical `paragraphs` table
 
 ### 5.4 Each chunk stores
 
@@ -280,7 +291,7 @@ Each record:
 
 **Write to SQLite**:
 - Insert into `sermons` table
-- Insert into `paragraphs` table
+- Insert into `paragraphs` table, including denormalized `sermon_title`
 
 **No chunking yet.**
 
@@ -296,7 +307,11 @@ Each record:
 1. Pack paragraphs using word budget (rules from Section 5)
 2. Assign `chunk_index` sequentially (0 to N-1)
 3. Generate `chunk_id` = `{date_id}_chunk_{chunk_index}` (no zero-padding)
-4. Write rows into `chunks` table
+4. Join sermon metadata from `sermons.title`
+5. Write rows into `chunks` table, including:
+   - `sermon_title`
+   - `text_with_metadata`
+   - `is_tail_chunk`
 
 **Output**: `chunks.sqlite` (with `chunks` table populated)
 
@@ -307,11 +322,12 @@ Each record:
 **Input**:
 
 ```sql
-SELECT chunk_id, text FROM chunks;
+SELECT chunk_id, text_with_metadata FROM chunks;
 ```
 
 **Process**:
 - BM25 documents are chunks, keyed by `chunk_id`
+- Default text source is `text_with_metadata` so metadata queries can match sermon title, date_id, and paragraph markers
 - Use lightweight BM25 library (e.g., `rank-bm25` in Python)
 - Serialize index
 
@@ -328,13 +344,13 @@ SELECT chunk_id, text FROM chunks;
 **Input**:
 
 ```sql
-SELECT chunk_id, text FROM chunks;
+SELECT chunk_id, text_with_metadata FROM chunks;
 ```
 
 **Embedding Model (V1)**: `Qwen/Qwen3-Embedding-0.6B`
 
 **Process**:
-1. Generate embeddings using configured embedding model (V1: Qwen3-Embedding-0.6B)
+1. Generate embeddings from `text_with_metadata` using configured embedding model (V1: Qwen3-Embedding-0.6B)
 2. Normalize embeddings to unit length (for cosine similarity via inner product)
 3. Build FAISS index from embeddings
 4. Assign FAISS row id (0 to N-1, sequential)
@@ -600,8 +616,8 @@ When the Model API returns an answer, it must include:
 
 ### Tables
 - `sermons`: date_id, title, source, language
-- `paragraphs`: date_id, paragraph_no, text
-- `chunks`: chunk_id, date_id, paragraph_start, paragraph_end, chunk_index, text, word_count, char_count
+- `paragraphs`: date_id, paragraph_no, sub_id, text, sermon_title
+- `chunks`: chunk_id, date_id, paragraph_start, paragraph_end, chunk_index, text, word_count, char_count, sermon_title, text_with_metadata, is_tail_chunk
 
 ### Runtime bundle files
 - `chunks.sqlite`

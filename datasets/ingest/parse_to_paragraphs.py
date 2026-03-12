@@ -141,6 +141,7 @@ class Paragraph:
     paragraph_no: int
     text: str
     sub_id: str = ""
+    sermon_title: str = ""
 
 
 # ----------------------------
@@ -819,6 +820,119 @@ def extract_title_from_text(text: str, max_lines: int = 10) -> tuple[str, int]:
     return title, title_end_idx
 
 
+def _normalize_title_line(s: str) -> str:
+    """
+    Normalize a title/header line for conservative equality checks.
+    """
+    s = (s or "").strip()
+    s = s.replace("—", "-").replace("–", "-")
+    s = re.sub(r"\s+", " ", s)
+    return s.upper()
+
+
+def remove_repeated_sermon_title_headers(text: str, sermon_title: str) -> str:
+    """
+    Remove repeated per-page sermon-title headers from extracted text.
+
+    Typical leak pattern in interior pages:
+      JEHOVAH-JIREH
+      11
+      70 ...
+
+    If left in place, those title/page lines get stitched into paragraph text.
+    """
+    normalized_title = _normalize_title_line(sermon_title)
+    if not normalized_title:
+        return text
+
+    lines = text.split("\n")
+    out: list[str] = []
+    i = 0
+
+    def _next_nonempty_idx(start: int) -> int | None:
+        for j in range(start, len(lines)):
+            if lines[j].strip():
+                return j
+        return None
+
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        normalized = _normalize_title_line(stripped)
+
+        # Drop combined header lines such as "JEHOVAH-JIREH 11" or "11 JEHOVAH-JIREH".
+        if stripped:
+            combined_re = re.compile(
+                rf"^(?:{re.escape(normalized_title)}\s+\d{{1,3}}|\d{{1,3}}\s+{re.escape(normalized_title)})$",
+                flags=re.IGNORECASE,
+            )
+            if combined_re.match(normalized):
+                i += 1
+                continue
+
+        # Drop the split 2-line header pattern:
+        #   <SERMON TITLE>
+        #   <PAGE NUMBER>
+        if normalized == normalized_title:
+            next_idx = _next_nonempty_idx(i + 1)
+            if next_idx is not None and re.fullmatch(r"\d{1,3}", lines[next_idx].strip()):
+                i = next_idx + 1
+                continue
+
+        out.append(line)
+        i += 1
+
+    return "\n".join(out)
+
+
+def remove_terminal_sermon_metadata(text: str, date_id: str) -> str:
+    """
+    Remove trailing post-sermon metadata that appears after the closing ``.
+
+    Typical leak pattern:
+      God bless you, Brother Buntain. 
+      61-0212M Jehovah-Jireh
+      First Assembly Of God Of Long Beach
+      Long Beach, California U.S.A.
+      ENGLISH
+      ...
+    """
+    lines = text.split("\n")
+    last_marker_idx = None
+    for idx, line in enumerate(lines):
+        if "" in line:
+            last_marker_idx = idx
+
+    if last_marker_idx is None or last_marker_idx >= len(lines) - 1:
+        return text
+
+    trailer_lines = [ln for ln in lines[last_marker_idx + 1 :] if ln.strip()]
+    if not trailer_lines:
+        return text
+
+    trailer = "\n".join(trailer_lines)
+    if (
+        date_id in trailer
+        or "VOICE OF GOD RECORDINGS" in trailer
+        or "Copyright Notice" in trailer
+        or "ALL RIGHTS RESERVED" in trailer
+        or "U.S.A." in trailer
+        or re.search(r"^\s*ENGLISH\s*$", trailer, flags=re.MULTILINE)
+    ):
+        return "\n".join(lines[: last_marker_idx + 1])
+
+    return text
+
+
+def clean_extracted_sermon_text(text: str, sermon_title: str, date_id: str) -> str:
+    """
+    Remove repeated title headers and trailing footer metadata before paragraph parsing.
+    """
+    text = remove_repeated_sermon_title_headers(text, sermon_title)
+    text = remove_terminal_sermon_metadata(text, date_id)
+    return text
+
+
 def parse_paragraphs_with_numbering(text: str, date_id: str, skip_lines: int = 0) -> list[Paragraph]:
     """
     Parse paragraphs when VGR numbering is present
@@ -1346,14 +1460,48 @@ def clean_paragraph_metadata(para_text: str, date_id: str) -> str:
     Format: date_id + TitleNoSpaces + Location
     Example: "65-0117AParadox WestwardHoHotel Phoenix,ArizonaU.S.A."
     """
+    cleaned = re.sub(r'^\s*\s*', '', para_text)
+
     # Pattern: date_id followed by concatenated text ending with location
     metadata_pattern = r'\s*\d{2}-\d{4}[SMABEX]?[A-Z][A-Za-z,\s]*U\.S\.A\.\s*$'
-    cleaned = re.sub(metadata_pattern, '', para_text)
+    cleaned = re.sub(metadata_pattern, '', cleaned)
     
     # Also remove any trailing "ENGLISH" tags
     cleaned = re.sub(r'\s*ENGLISH\s*$', '', cleaned, flags=re.IGNORECASE)
     
+    cleaned = cleaned.strip()
+
+    # If closing sermon marker is followed by metadata on the same paragraph line,
+    # keep only the sermon-ending marker.
+    marker_idx = cleaned.find("")
+    if marker_idx > 0:
+        trailing = cleaned[marker_idx + 1 :]
+        if (
+            date_id in trailing
+            or "VOICE OF GOD RECORDINGS" in trailing
+            or "ALL RIGHTS RESERVED" in trailing
+            or "U.S.A." in trailing
+            or "ENGLISH" in trailing
+        ):
+            cleaned = cleaned[: marker_idx + 1].rstrip()
+
     return cleaned.strip()
+
+
+def attach_sermon_title(paragraphs: list[Paragraph], sermon_title: str) -> list[Paragraph]:
+    """
+    Copy sermon title into paragraph rows for downstream paragraph-level utilities.
+    """
+    return [
+        Paragraph(
+            date_id=p.date_id,
+            paragraph_no=p.paragraph_no,
+            text=p.text,
+            sub_id=p.sub_id,
+            sermon_title=sermon_title,
+        )
+        for p in paragraphs
+    ]
 
 
 def parse_pdf_to_sermon(pdf_path: Path) -> tuple[Sermon, list[Paragraph]]:
@@ -1371,6 +1519,8 @@ def parse_pdf_to_sermon(pdf_path: Path) -> tuple[Sermon, list[Paragraph]]:
         raise ValueError(f"No text extracted from {pdf_path}")
     
     # Extract title and find where it ends
+    title, title_end_line = extract_title_from_text(text)
+    text = clean_extracted_sermon_text(text, title, date_id)
     title, title_end_line = extract_title_from_text(text)
     
     # Create sermon metadata
@@ -1416,8 +1566,19 @@ def parse_pdf_to_sermon(pdf_path: Path) -> tuple[Sermon, list[Paragraph]]:
         print(f"  [WARN] No VGR numbering found, generating paragraphs deterministically")
         paragraphs = generate_paragraphs_deterministic(text, date_id, skip_lines=title_end_line)
     
-    # Post-process: Clean metadata from last paragraph
+    # Post-process: Clean sermon boundary markers/metadata from first and last paragraphs
     if paragraphs:
+        first_para = paragraphs[0]
+        cleaned_first_text = clean_paragraph_metadata(first_para.text, date_id)
+        if cleaned_first_text != first_para.text:
+            paragraphs[0] = Paragraph(
+                date_id=first_para.date_id,
+                paragraph_no=first_para.paragraph_no,
+                text=cleaned_first_text,
+                sub_id=first_para.sub_id,
+                sermon_title=title,
+            )
+
         last_para = paragraphs[-1]
         cleaned_text = clean_paragraph_metadata(last_para.text, date_id)
         if cleaned_text != last_para.text:
@@ -1427,8 +1588,10 @@ def parse_pdf_to_sermon(pdf_path: Path) -> tuple[Sermon, list[Paragraph]]:
                 paragraph_no=last_para.paragraph_no,
                 text=cleaned_text,
                 sub_id=last_para.sub_id,
+                sermon_title=title,
             )
-    
+
+    paragraphs = attach_sermon_title(paragraphs, title)
     return sermon, paragraphs
 
 
@@ -1461,9 +1624,15 @@ def init_database(db_path: Path) -> sqlite3.Connection:
             paragraph_no INTEGER,
             sub_id TEXT DEFAULT '',
             text TEXT,
+            sermon_title TEXT,
             PRIMARY KEY (date_id, paragraph_no, sub_id)
         )
     """)
+
+    cursor.execute("PRAGMA table_info(paragraphs)")
+    existing_cols = {row[1] for row in cursor.fetchall()}
+    if "sermon_title" not in existing_cols:
+        cursor.execute("ALTER TABLE paragraphs ADD COLUMN sermon_title TEXT")
     
     conn.commit()
     return conn
@@ -1484,9 +1653,9 @@ def insert_paragraphs(conn: sqlite3.Connection, paragraphs: list[Paragraph]) -> 
     cursor = conn.cursor()
     for para in paragraphs:
         cursor.execute("""
-            INSERT OR REPLACE INTO paragraphs (date_id, paragraph_no, sub_id, text)
-            VALUES (?, ?, ?, ?)
-        """, (para.date_id, para.paragraph_no, para.sub_id or "", para.text))
+            INSERT OR REPLACE INTO paragraphs (date_id, paragraph_no, sub_id, text, sermon_title)
+            VALUES (?, ?, ?, ?, ?)
+        """, (para.date_id, para.paragraph_no, para.sub_id or "", para.text, para.sermon_title))
     conn.commit()
 
 
@@ -1795,6 +1964,7 @@ def manual_ingest_date_id(db_path: Path, pdf_dir: Path, date_id: str) -> int:
     paragraphs = _parse_marker_driven(text, date_id, title_end_line)
     if not paragraphs:
         paragraphs = generate_paragraphs_deterministic(text, date_id, skip_lines=title_end_line)
+    paragraphs = attach_sermon_title(paragraphs, title)
 
     sermon = Sermon(date_id=date_id, title=title, source=pdf_path.name, language="en")
 

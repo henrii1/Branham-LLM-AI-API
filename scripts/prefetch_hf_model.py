@@ -105,10 +105,12 @@ def warm_embedder(model_id: str = EMBEDDING_MODEL) -> None:
         from branham_model_api.retrieval.dense import DenseEmbedder, EmbedderConfig
         
         load_start = time.perf_counter()
+        offline = os.getenv("HF_OFFLINE_ONLY", "").strip().lower() in {"1", "true", "yes"}
         config = EmbedderConfig(
             model_id=model_id,
             query_instruction_template="Instruct: {task}\nQuery:{query}",
             query_task_description="Given a question about William Branham's teachings or sermons, retrieve relevant sermon passages that answer the query",
+            local_files_only=offline,
         )
         embedder = DenseEmbedder(config)
         load_ms = (time.perf_counter() - load_start) * 1000
@@ -146,7 +148,8 @@ def warm_reranker(model_id: str = RERANKER_MODEL) -> None:
         from branham_model_api.retrieval.reranker import Reranker, RerankerConfig
         
         load_start = time.perf_counter()
-        config = RerankerConfig(model_id=model_id)
+        offline = os.getenv("HF_OFFLINE_ONLY", "").strip().lower() in {"1", "true", "yes"}
+        config = RerankerConfig(model_id=model_id, local_files_only=offline)
         reranker = Reranker(config)
         load_ms = (time.perf_counter() - load_start) * 1000
         print(f"  Model loaded in {load_ms:.0f}ms (device: {reranker.device})")

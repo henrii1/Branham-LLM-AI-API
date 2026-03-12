@@ -23,14 +23,16 @@ COPY src ./src
 # We intentionally omit uv.lock so uv re-resolves for CPU backend.
 RUN uv lock && uv sync --frozen --no-dev
 
-# Prefetch embedding model into the image (avoids runtime download).
+# Prefetch model artifacts into the image and perform a build-side warm pass.
 # HF_HOME inside the image so the model weights are part of the layer.
+# Note: build-time warm validates the cached artifacts, but runtime process
+# memory is always fresh per container.
 ENV HF_HOME=/app/.hf-cache
 COPY config/default.yaml ./config/default.yaml
 COPY scripts/prefetch_hf_model.py ./scripts/prefetch_hf_model.py
 
-RUN /app/.venv/bin/python scripts/prefetch_hf_model.py \
-      --all --target-dir /app/.hf-cache
+RUN HF_OFFLINE_ONLY=1 /app/.venv/bin/python scripts/prefetch_hf_model.py \
+      --all --warm --target-dir /app/.hf-cache
 
 # ── Runtime stage ──────────────────────────────────────────────────
 FROM python:3.12-slim
@@ -40,6 +42,8 @@ ENV PYTHONUNBUFFERED=1 \
     PATH="/app/.venv/bin:$PATH" \
     HF_HOME=/app/.hf-cache \
     HF_OFFLINE_ONLY=1 \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
     PORT=8080
 
 WORKDIR /app

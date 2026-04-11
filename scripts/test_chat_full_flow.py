@@ -217,7 +217,7 @@ def _extract_external_info(query: str, tool_outputs: list[dict[str, Any]]) -> di
             return {
                 "disclaimer": payload.get("disclaimer", "Unverified external search results."),
                 "sources": [
-                    s.get("url")
+                    {"title": s.get("title") or "", "url": s.get("url") or ""}
                     for s in payload.get("sources", [])
                     if isinstance(s, dict) and s.get("url")
                 ],

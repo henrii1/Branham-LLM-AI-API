@@ -102,16 +102,40 @@ def test_bible_query_can_pass_with_bible_reference() -> None:
     assert "Hebrews 11:1" in out.answer
 
 
-def test_external_section_added_only_when_external_info_present() -> None:
+def test_external_section_stripped_when_only_sources_no_narrative() -> None:
     out = finalize_answer(
         query="Tell me current events about Branham ministries",
         answer="Summary with sermon ref [47-0412M: ¶2–¶3].",
-        external_info={"disclaimer": "Unverified external search results.", "sources": ["https://example.com"]},
+        external_info={
+            "disclaimer": "Unverified external search results.",
+            "sources": [{"title": "Example Site", "url": "https://example.com"}],
+        },
+        refusal_message=REFUSAL,
+    )
+    assert out.mode == "answer"
+    # Sources-only unverified section should be stripped
+    assert "## Unverified / External Information" not in out.answer
+
+
+def test_external_section_kept_when_model_writes_narrative() -> None:
+    out = finalize_answer(
+        query="Tell me about Brother Branham's death",
+        answer=(
+            "Answer:\nHe died in 1965.\n\n"
+            "## Unverified / External Information\n"
+            "External sources report a head-on collision near Friona, Texas.\n\n"
+            "Sources:\n"
+            "- [Example Site](https://example.com)"
+        ),
+        external_info={
+            "disclaimer": "Unverified external search results.",
+            "sources": [{"title": "Example Site", "url": "https://example.com"}],
+        },
         refusal_message=REFUSAL,
     )
     assert out.mode == "answer"
     assert "## Unverified / External Information" in out.answer
-    assert "[Source 1](https://example.com)" in out.answer
+    assert "head-on collision" in out.answer
 
 
 def test_external_section_removed_when_external_info_absent() -> None:

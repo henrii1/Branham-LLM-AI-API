@@ -384,7 +384,7 @@ class ChatRuntime:
                             "disclaimer", "Unverified external search results."
                         ),
                         "sources": [
-                            s.get("url")
+                            {"title": s.get("title") or "", "url": s.get("url") or ""}
                             for s in payload.get("sources", [])
                             if s.get("url")
                         ],
@@ -1215,7 +1215,7 @@ async def chat(
                                     "Unverified external search results.",
                                 ),
                                 "sources": [
-                                    s.get("url")
+                                    {"title": s.get("title") or "", "url": s.get("url") or ""}
                                     for s in payload.get("sources", [])
                                     if s.get("url")
                                 ],

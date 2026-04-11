@@ -77,6 +77,70 @@ _REF_BULLET_PATTERN = re.compile(
 )
 
 UNVERIFIED_SECTION_HEADER = "## Unverified / External Information"
+
+_BIOGRAPHY_LINK_PATTERN = re.compile(r"lifeboatchurch\.org")
+
+_BRANHAM_MENTION_PATTERN = re.compile(
+    r"(?i)\b(?:branham|bro\.?\s*branham|brother\s+branham|william\s+branham)\b"
+)
+
+
+def _is_pure_internet_answer(text: str) -> bool:
+    """
+    True when the Answer body contains Branham references but has no sermon
+    citations and no biography link — meaning it is purely internet-derived
+    content that the model placed in Answer instead of Unverified.
+    """
+    if not _BRANHAM_MENTION_PATTERN.search(text):
+        return False
+    if SERMON_REF_PATTERN.search(text):
+        return False
+    if _BIOGRAPHY_LINK_PATTERN.search(text):
+        return False
+    return True
+
+
+def _relocate_internet_answer_to_unverified(text: str) -> tuple[str, bool]:
+    """
+    When the model writes only internet-derived Branham content in Answer
+    (no sermon refs, no biography link), move that content into the
+    Unverified section so Answer stays clean.
+
+    Returns (new_text, was_relocated).
+    """
+    # Split off any existing Unverified section the model may have written
+    if UNVERIFIED_SECTION_HEADER in text:
+        before, _, after = text.partition(UNVERIFIED_SECTION_HEADER)
+    else:
+        before = text
+        after = ""
+
+    answer_body = before.strip()
+
+    # Extract the "Answer:" header line and the body
+    body_without_header = answer_body
+    if body_without_header.lower().startswith("answer:"):
+        body_without_header = body_without_header[len("answer:"):].strip()
+
+    if not body_without_header:
+        return text, False
+
+    if not _is_pure_internet_answer(body_without_header):
+        return text, False
+
+    # Relocate: keep just a brief Answer header, move body to Unverified
+    moved = body_without_header
+    existing_unverified = after.strip()
+    unverified_content = (moved + "\n\n" + existing_unverified).strip() if existing_unverified else moved
+
+    new_text = (
+        "Answer:\n\n"
+        + UNVERIFIED_SECTION_HEADER + "\n"
+        + unverified_content
+    )
+    return new_text.strip(), True
+
+
 _NON_COMPLIANT_REFUSAL_PATTERNS = (
     "provided rag context",
     "provided sermon context",
@@ -132,17 +196,74 @@ def _append_external_section(answer: str, external_info: dict[str, Any]) -> str:
     if sources:
         lines.append("")
         lines.append("Sources:")
-        for idx, src in enumerate(sources, start=1):
-            url = str(src).strip()
-            if url:
-                lines.append(f"- [Source {idx}]({url})")
+        for src in sources:
+            if isinstance(src, dict):
+                url = str(src.get("url") or "").strip()
+                title = str(src.get("title") or "").strip()
+                if url:
+                    label = title if title else _label_from_url(url)
+                    lines.append(f"- [{label}]({url})")
+            elif isinstance(src, str) and src.strip():
+                # Backward compat: bare URL strings
+                url = src.strip()
+                lines.append(f"- [{_label_from_url(url)}]({url})")
     return "\n".join(lines).strip()
+
+
+def _label_from_url(url: str) -> str:
+    """Derive a short human-readable label from a URL when no title is available."""
+    try:
+        from urllib.parse import urlparse
+        host = urlparse(url).hostname or ""
+        # Strip www. prefix
+        if host.startswith("www."):
+            host = host[4:]
+        return host.split(".")[0].capitalize() if host else "External Source"
+    except Exception:
+        return "External Source"
 
 
 def _remove_external_section(answer: str) -> str:
     if UNVERIFIED_SECTION_HEADER not in answer:
         return answer
     before, _, _ = answer.partition(UNVERIFIED_SECTION_HEADER)
+    return before.rstrip()
+
+
+def _strip_empty_unverified_section(answer: str) -> str:
+    """
+    Remove the Unverified section if it has no substantive narrative content
+    (only the boilerplate disclaimer and/or source links, no actual text).
+    """
+    if UNVERIFIED_SECTION_HEADER not in answer:
+        return answer
+    before, _, after = answer.partition(UNVERIFIED_SECTION_HEADER)
+    # Check if the section has real narrative beyond disclaimer + source links
+    lines = after.strip().splitlines()
+    has_narrative = False
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        # Skip boilerplate disclaimer
+        if stripped.lower() in (
+            "unverified external search results.",
+            "unverified external search results",
+        ):
+            continue
+        # Skip "Sources:" header
+        if stripped.lower() == "sources:":
+            continue
+        # Skip source link bullets: - [label](url)
+        if re.match(r"^-\s*\[.+\]\(https?://.+\)\s*$", stripped):
+            continue
+        # Anything else is real narrative
+        has_narrative = True
+        break
+
+    if has_narrative:
+        return answer
+    # No narrative — strip the entire section
     return before.rstrip()
 
 
@@ -171,19 +292,8 @@ def _strip_non_sermon_sections(answer: str) -> str:
 
     cleaned = "\n".join(lines).strip()
 
-    # If the model emitted an "Unverified / External Information" header without
-    # using the official external_info channel, collapse it back into Answer
-    # (remove the header label, keep the content).
-    cleaned = re.sub(
-        r"(?im)^\s*(?:#{1,6}\s*)?unverified\s*/\s*external\s*information\s*:?\s*$",
-        "",
-        cleaned,
-    )
-    cleaned = re.sub(
-        r"(?im)^\s*\*{1,2}\s*unverified\s*/\s*external\s*information\s*:?\s*\*{1,2}\s*$",
-        "",
-        cleaned,
-    )
+    # Remove stale "note: these are unverified external claims" lines
+    # but preserve the official ## Unverified / External Information header.
     cleaned = re.sub(
         r"(?im)^\s*note:\s*these\s+are\s+unverified\s+external\s+claims.*$",
         "",
@@ -253,12 +363,22 @@ def _strip_internal_mechanics_language(answer: str) -> tuple[str, bool]:
         text = re.sub(pat, "", text)
     # If phrase appears inline inside a sentence, scrub only the phrase.
     inline_patterns = (
-        r"(?i)\bprovided\s+rag\s+context\b",
-        r"(?i)\bprovided\s+sermon\s+context\b",
-        r"(?i)\bcurrent\s+sermon\s+context\b",
+        (r"(?i)\bprovided\s+rag\s+context\b", "available evidence"),
+        (r"(?i)\bprovided\s+sermon\s+context\b", "available evidence"),
+        (r"(?i)\bcurrent\s+sermon\s+context\b", "available evidence"),
+        (r"(?i)\bthe\s+biography\s+tool\b", ""),
+        (r"(?i)\bbiography\s+tool\b", ""),
+        (r"(?i)\bbiography\s+search\b", ""),
+        (r"(?i)\ba\s+curated\s+biography\s+states:?\s*", ""),
+        (r"(?i)\bthe\s+biography\s+states:?\s*", ""),
+        (r"(?i)\baccording\s+to\s+the\s+biography,?\s*", ""),
+        (r"(?i)\bbiographical\s+sources?\s+(?:state|indicate|confirm|note)s?:?\s*", ""),
+        (r"(?i)\bfrom\s+(?:the\s+)?(?:verified\s+)?biography,?\s*", ""),
+        (r"(?i)\b(?:the\s+)?searched\s+sermon\s+archives?\b", "the sermons"),
+        (r"(?i)\b(?:the\s+)?sermon\s+archives?\b", "the sermons"),
     )
-    for pat in inline_patterns:
-        text = re.sub(pat, "available evidence", text)
+    for pat, replacement in inline_patterns:
+        text = re.sub(pat, replacement, text)
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
     return text, (text != original)
 
@@ -399,17 +519,27 @@ def finalize_answer(
                 issues=["normalized_non_compliant_refusal_style"],
             )
 
+    # Bible/comparison responses without sermon citations should not include
+    # sermon-only footers/placeholders. Run BEFORE appending external section
+    # so the server-appended Unverified section is never stripped.
+    if not has_sermon_reference(text):
+        text = _strip_non_sermon_sections(text)
+
+    # If the model put only internet-derived Branham content in Answer
+    # (no sermon refs, no biography link), relocate it to Unverified.
+    relocated = False
+    if external_info:
+        text, relocated = _relocate_internet_answer_to_unverified(text)
+
     if external_info:
         text = _append_external_section(text, external_info)
     else:
         text = _remove_external_section(text)
 
-    # Bible/comparison responses without sermon citations should not include
-    # sermon-only footers/placeholders.
-    if not has_sermon_reference(text):
-        text = _strip_non_sermon_sections(text)
-
     text = _merge_sermon_references(text)
+
+    # Strip Unverified section if it has no real narrative (just disclaimer + links)
+    text = _strip_empty_unverified_section(text)
 
     return PostcheckResult(
         mode="answer",
@@ -422,6 +552,7 @@ def finalize_answer(
                 else []
             ),
             *(["normalized_answer_header"] if normalized_answer_header else []),
+            *(["relocated_internet_content_to_unverified"] if relocated else []),
         ],
     )
 

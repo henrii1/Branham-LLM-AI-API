@@ -176,6 +176,7 @@ def load_system_prompt(path: Path | None = None) -> str:
 def build_system_prompt(
     *,
     refusal_message: str,
+    insufficient_context_message: str | None = None,
     base_prompt_path: Path | None = None,
     extra_instructions: str | None = None,
 ) -> str:
@@ -191,6 +192,10 @@ def build_system_prompt(
         rendered = base.replace(placeholder, refusal_message).strip()
     else:
         rendered = (base + f'\n\nRefusal message: "{refusal_message}"').strip()
+
+    ic_placeholder = "{{INSUFFICIENT_CONTEXT_MESSAGE}}"
+    if insufficient_context_message and ic_placeholder in rendered:
+        rendered = rendered.replace(ic_placeholder, insufficient_context_message)
 
     extra = (extra_instructions or "").strip()
     if extra:

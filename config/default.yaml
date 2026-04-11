@@ -165,5 +165,8 @@ performance:
 
 # Refusal Messages
 refusal:
+  # Off-topic: query is not about Branham/sermons/Bible at all (e.g. "capital of France")
   fixed_message: "I can only answer questions based on William Branham's sermons. I don't have enough relevant information to answer your question."
+  # Insufficient context: query IS about Branham but evidence is too weak to answer reliably
+  insufficient_context_message: "I searched through the sermon archives but couldn't find enough relevant context to give you a reliable answer on this. If you can provide more details — such as a sermon title, approximate date, or related topic — I'd be happy to search again."
 

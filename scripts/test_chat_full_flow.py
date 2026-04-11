@@ -34,6 +34,7 @@ from branham_model_api.api.routes.chat import (  # noqa: E402
     SERVICE_UNAVAILABLE_MESSAGE,
     _ENGLISH_ONLY_MESSAGE,
     _get_fixed_refusal_message,
+    _get_insufficient_context_message,
     _is_english_request,
     _maybe_override_refusal_for_allowed_query,
     _normalize_english_only_reply,
@@ -386,7 +387,7 @@ def _run_full_flow(
     if retrieval_result.should_refuse and not (
         is_bible_query(request.query) or is_comparison_query(request.query)
     ):
-        refusal = _get_fixed_refusal_message()
+        refusal = _get_insufficient_context_message()
         run_report["final"] = {
             "mode": "refusal",
             "answer": refusal,
@@ -410,6 +411,7 @@ def _run_full_flow(
 
     system_prompt = build_system_prompt(
         refusal_message=_get_fixed_refusal_message(),
+        insufficient_context_message=_get_insufficient_context_message(),
         extra_instructions=_query_mode_prompt_addendum(request.query),
     )
     llm_messages = build_chat_messages(
@@ -438,6 +440,7 @@ def _run_full_flow(
         answer=loop_result.answer,
         external_info=external_info,
         refusal_message=_get_fixed_refusal_message(),
+        insufficient_context_message=_get_insufficient_context_message(),
     )
     checked = _maybe_override_refusal_for_allowed_query(
         runtime=runtime,

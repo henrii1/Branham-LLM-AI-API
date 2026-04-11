@@ -61,15 +61,38 @@ _cached_chat_bearer_key: str | None = None
 MAX_TOOL_ITERATIONS = 5
 
 
+_DEFAULT_OFF_TOPIC_REFUSAL = (
+    "I can only answer questions based on William Branham's sermons. "
+    "I don't have enough relevant information to answer your question."
+)
+_DEFAULT_INSUFFICIENT_CONTEXT_REFUSAL = (
+    "I searched through the sermon archives but couldn't find enough relevant "
+    "context to give you a reliable answer on this. If you can provide more "
+    "details \u2014 such as a sermon title, approximate date, or related topic "
+    "\u2014 I'd be happy to search again."
+)
+
+
 def _get_fixed_refusal_message() -> str:
     try:
         raw = load_yaml_config()
         return raw.get("refusal", {}).get(
             "fixed_message",
-            "I can only answer questions based on William Branham's sermons. I don't have enough relevant information to answer your question.",
+            _DEFAULT_OFF_TOPIC_REFUSAL,
         )
     except Exception:
-        return "I can only answer questions based on William Branham's sermons. I don't have enough relevant information to answer your question."
+        return _DEFAULT_OFF_TOPIC_REFUSAL
+
+
+def _get_insufficient_context_message() -> str:
+    try:
+        raw = load_yaml_config()
+        return raw.get("refusal", {}).get(
+            "insufficient_context_message",
+            _DEFAULT_INSUFFICIENT_CONTEXT_REFUSAL,
+        )
+    except Exception:
+        return _DEFAULT_INSUFFICIENT_CONTEXT_REFUSAL
 
 
 _ENGLISH_ONLY_MESSAGE = (
@@ -340,6 +363,7 @@ class ChatRuntime:
         """Non-streaming generate (kept for test_chat_full_flow.py)."""
         system_prompt = build_system_prompt(
             refusal_message=_get_fixed_refusal_message(),
+            insufficient_context_message=_get_insufficient_context_message(),
             extra_instructions=_query_mode_prompt_addendum(request.query),
         )
         messages = build_chat_messages(
@@ -732,6 +756,7 @@ def _generate_allowed_query_fallback(
     )
     system = build_system_prompt(
         refusal_message=_get_fixed_refusal_message(),
+        insufficient_context_message=_get_insufficient_context_message(),
         extra_instructions=(
             addendum
             + "\n"
@@ -892,7 +917,7 @@ async def chat(
             if retrieval_result.should_refuse and not (
                 is_bible_query(request.query) or is_comparison_query(request.query)
             ):
-                refusal = _get_fixed_refusal_message()
+                refusal = _get_insufficient_context_message()
                 yield _sse_event("delta", {"text": refusal})
                 yield _sse_event(
                     "final",
@@ -958,6 +983,7 @@ async def chat(
             # ---- Build messages ----
             system_prompt = build_system_prompt(
                 refusal_message=_get_fixed_refusal_message(),
+                insufficient_context_message=_get_insufficient_context_message(),
                 extra_instructions=_query_mode_prompt_addendum(request.query),
             )
             working_messages = build_chat_messages(
@@ -1201,6 +1227,7 @@ async def chat(
                     answer=streamed_answer,
                     external_info=external_info,
                     refusal_message=_get_fixed_refusal_message(),
+                    insufficient_context_message=_get_insufficient_context_message(),
                 )
                 checked = _maybe_override_refusal_for_allowed_query(
                     runtime=runtime,

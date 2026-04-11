@@ -360,6 +360,7 @@ def finalize_answer(
     answer: str,
     external_info: dict[str, Any] | None,
     refusal_message: str,
+    insufficient_context_message: str | None = None,
 ) -> PostcheckResult:
     """
     Normalize model output before returning to client.
@@ -373,21 +374,27 @@ def finalize_answer(
     text, normalized_answer_header = _normalize_leading_answer_header(text)
 
     # Normalize model-produced refusal variants to the fixed refusal contract.
+    # Recognize both off-topic and insufficient-context refusal messages.
+    refusal_messages = [refusal_message]
+    if insufficient_context_message:
+        refusal_messages.append(insufficient_context_message)
+
     if not external_info:
         normalized_for_refusal_check = text
         if normalized_for_refusal_check.lower().startswith("answer:"):
             normalized_for_refusal_check = normalized_for_refusal_check[7:].strip()
-        if normalized_for_refusal_check == refusal_message:
-            return PostcheckResult(
-                mode="refusal",
-                answer=refusal_message,
-                external_info=None,
-                issues=[],
-            )
+        for rmsg in refusal_messages:
+            if normalized_for_refusal_check == rmsg:
+                return PostcheckResult(
+                    mode="refusal",
+                    answer=rmsg,
+                    external_info=None,
+                    issues=[],
+                )
         if _is_non_compliant_refusal_style(text):
             return PostcheckResult(
                 mode="refusal",
-                answer=refusal_message,
+                answer=insufficient_context_message or refusal_message,
                 external_info=None,
                 issues=["normalized_non_compliant_refusal_style"],
             )

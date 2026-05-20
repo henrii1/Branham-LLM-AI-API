@@ -45,12 +45,16 @@ AR_REPO = "branham-llm-api"
 AR_DOMAIN = f"{REGION}-docker.pkg.dev"
 IMAGE_NAME = f"{AR_DOMAIN}/{PROJECT_ID}/{AR_REPO}/{SERVICE_NAME}"
 
-# Cloud Run resource settings (from WORKING_PROGRESS.md targets)
-MEMORY = "4Gi"
+# Cloud Run resource settings.
+# Startup footprint is ~3.2 GB (Qwen3-Embedding + FAISS flat-IP + BM25 + chunk
+# store), which is tight on 4Gi under burst load. 6Gi gives genuine headroom
+# without doubling steady-state cost. Concurrency 6 spreads heavy moments
+# across instances rather than piling onto one.
+MEMORY = "6Gi"
 CPU = "2"
 MAX_INSTANCES = 5
 MIN_INSTANCES = 1
-CONCURRENCY = 10
+CONCURRENCY = 6
 REQUEST_TIMEOUT = 300
 PORT = 8080
 # Startup budget: model warm ≈ 30s + uvicorn boot ≈ 5s + buffer

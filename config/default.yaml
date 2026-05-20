@@ -44,7 +44,7 @@ llm:
     exclude: true
   providers:
     openrouter:
-      model: openrouter/x-ai/grok-4.1-fast
+      model: openrouter/x-ai/grok-4.3
       base_url: https://openrouter.ai/api/v1
       key_prefix: OPENROUTER_API_KEY
     deepseek:

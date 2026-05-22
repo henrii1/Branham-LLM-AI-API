@@ -180,7 +180,29 @@ class DbSearchTool:
                                     "query": {"type": "string"},
                                     "limit": {"type": "integer"},
                                     "head": {"type": "integer"},
-                                    "requests": {"type": "array"},
+                                    "requests": {
+                                        "type": "array",
+                                        "description": (
+                                            "For nested batch_read: list of paragraph ranges. "
+                                            "Gemini requires explicit items schema here."
+                                        ),
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "date_id": {"type": "string"},
+                                                "title_query": {"type": "string"},
+                                                "year": {"oneOf": [{"type": "integer"}, {"type": "string"}]},
+                                                "date_id_hint": {"type": "string"},
+                                                "paragraph_start": {
+                                                    "oneOf": [{"type": "integer"}, {"type": "string"}],
+                                                },
+                                                "paragraph_end": {
+                                                    "oneOf": [{"type": "integer"}, {"type": "string"}],
+                                                },
+                                            },
+                                            "required": ["paragraph_start", "paragraph_end"],
+                                        },
+                                    },
                                 },
                                 "required": ["mode"],
                             },

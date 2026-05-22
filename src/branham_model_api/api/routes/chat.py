@@ -30,6 +30,8 @@ from branham_model_api.core.pipeline import (
     finalize_answer,
     is_comparison_query,
     is_bible_query,
+    is_specific_fact_query,
+    is_unclear_query,
 )
 from branham_model_api.core.prompts import (
     build_chat_messages,
@@ -223,37 +225,63 @@ SERVICE_UNAVAILABLE_MESSAGE = "The service is temporarily unavailable right now.
 
 def _should_append_unverified_external_section(query: str) -> bool:
     """
-    Only force the Unverified/External section when the internet-derived facts are
-    about William/Bro Branham himself. For org/admin questions (VGR, tabernacle),
-    allow external facts to remain in Answer without the external section.
+    Force the Unverified / External Information section when `internet_search`
+    produced facts about Branham, his family, his organization, his followers,
+    or any Branham-ecosystem entity. The system prompt mandates this section
+    in those cases; this gate keeps the server-side enforcement aligned.
+
+    Returns False for purely off-topic queries that incidentally triggered
+    internet_search (rare; defensive guard).
     """
     q = f" {(query or '').strip().lower()} "
     if not q.strip():
         return False
 
-    # Org/admin queries: do not force the external section.
+    # William/Bro Branham person-focused queries.
+    if any(
+        p in q
+        for p in (
+            " bro branham",
+            " brother branham",
+            " william branham",
+            " w.m. branham",
+            " w. m. branham",
+        )
+    ):
+        return True
+
+    # Family members and son/daughter references.
+    if any(
+        p in q
+        for p in (
+            " joseph branham",
+            " billy paul branham",
+            " billy paul ",
+            "branham's son",
+            "branham's daughter",
+            "branham's wife",
+            "branham's children",
+            "branham's family",
+            "branham family",
+        )
+    ):
+        return True
+
+    # Followers / Message churches / Message ministers / current ecosystem.
+    if "follower" in q or "message church" in q or "message believer" in q:
+        return True
+    if "branham" in q and "minister" in q:
+        return True
+
+    # Organization (the prompt now mandates Unverified for these too).
     org_signals = (
         "voice of god recordings",
-        "vgr",
+        " vgr",
         "branham tabernacle",
-        "tabernacle",
         "branham.org",
-        "who runs",
-        "who is running",
-        "leadership",
-        "president",
-        "director",
-        "board",
+        "the table",
     )
     if any(s in q for s in org_signals):
-        return False
-
-    # William/Bro Branham person-focused queries: force the external section.
-    if "bro branham" in q or "brother branham" in q:
-        return True
-    if "william" in q and "branham" in q:
-        return True
-    if "w. m. branham" in q or "w.m. branham" in q:
         return True
 
     return False
@@ -336,6 +364,7 @@ class ChatRuntime:
                     timeout=llm_cfg.timeout,
                     temperature=llm_cfg.temperature,
                     reasoning=llm_cfg.reasoning,
+                    extra_body=llm_cfg.extra_body,
                 ),
                 key_manager=key_mgr,
             )
@@ -897,6 +926,41 @@ async def chat(
                 (time.perf_counter() - t_request) * 1000,
             )
             return
+
+        # ---- Pre-retrieval early-refusal gates ----
+        # These are deterministic patterns the model (at reasoning:enabled:false)
+        # cannot reliably gate via prompt alone. On match, emit the
+        # INSUFFICIENT_CONTEXT refusal directly and skip retrieval + LLM.
+        # Contract matches existing early-refusal flow: no `rag` event.
+        has_history = bool(request.history_window)
+        has_summary = bool(str(request.conversation_summary or "").strip())
+        gate_hit, gate_reason = is_unclear_query(
+            request.query, has_history=has_history, has_summary=has_summary
+        )
+        if not gate_hit:
+            gate_hit, gate_reason = is_specific_fact_query(request.query)
+        if gate_hit:
+            refusal = _get_insufficient_context_message()
+            yield _sse_event("delta", {"text": refusal})
+            yield _sse_event(
+                "final",
+                {
+                    "mode": "refusal",
+                    "answer": refusal,
+                    "external_info": None,
+                    "conversation_summary": None,
+                    "query_summary": None,
+                },
+            )
+            yield _sse_event("done", {"ok": True})
+            logger.info(
+                "TTFT(early_gate)=%.0fms total=%.0fms reason=%s",
+                (time.perf_counter() - t_request) * 1000,
+                (time.perf_counter() - t_request) * 1000,
+                gate_reason,
+            )
+            return
+
         retrieval_query = build_retrieval_query(
             request.query,
             request.conversation_summary,
@@ -1222,12 +1286,18 @@ async def chat(
                             }
                             break
 
+                tool_call_counts: dict[str, int] = {}
+                for to in tool_outputs_all:
+                    nm = to.get("name") or ""
+                    if nm:
+                        tool_call_counts[nm] = tool_call_counts.get(nm, 0) + 1
                 checked = finalize_answer(
                     query=request.query,
                     answer=streamed_answer,
                     external_info=external_info,
                     refusal_message=_get_fixed_refusal_message(),
                     insufficient_context_message=_get_insufficient_context_message(),
+                    tool_call_counts=tool_call_counts,
                 )
                 checked = _maybe_override_refusal_for_allowed_query(
                     runtime=runtime,

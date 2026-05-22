@@ -186,6 +186,158 @@ def has_bible_reference(answer: str) -> bool:
     return bool(BIBLE_REF_PATTERN.search(answer or ""))
 
 
+# Canonical Reader Note body — matches the system prompt's specification.
+_READER_NOTE_TEXT = (
+    "### Reader Note:\n"
+    "For full context and to verify wording, read the full sermon and cited "
+    "paragraphs in The Table: [The Table](https://table.branham.org/) "
+    "(plain link: https://table.branham.org/)"
+)
+
+
+# Inline Evidence-clause discipline: when the model emits a paragraph followed
+# by a blank line and a standalone `Evidence: [...]` line, the FE renders it
+# as a separate block instead of inline. The prompt mandates inline. Collapse
+# blank lines before any non-blockquote `Evidence: [...]` line.
+_STANDALONE_EVIDENCE_RE = re.compile(
+    r"^([^>\n].*[^\s])[ \t]*\n[ \t]*\nEvidence:\s*(\[)",
+    re.MULTILINE,
+)
+
+
+def _collapse_standalone_evidence_lines(text: str) -> tuple[str, bool]:
+    """Inline a standalone 'Evidence: [...]' line back onto its preceding paragraph.
+
+    Required to satisfy the FE's inline-citation styling. Skips lines inside
+    blockquotes (lines starting with `>`).
+    """
+    new_text, n = _STANDALONE_EVIDENCE_RE.subn(r"\1 Evidence: \2", text)
+    return new_text, n > 0
+
+
+def _reorder_sections(text: str) -> tuple[str, bool]:
+    """Enforce the canonical section order from the system prompt:
+        Answer body → (Quotes) → References → Reader Note → Unverified
+
+    The model sometimes emits References AFTER Unverified, which violates
+    the "Unverified MUST be the very last section" rule and breaks the FE's
+    section-order assumptions. This swap is narrow: if References appears
+    after Unverified, lift References (and Reader Note, if it's also trapped
+    after) to come before Unverified.
+    """
+    uv_match = re.search(r"^#{2,3}\s+Unverified\b", text, re.MULTILINE | re.IGNORECASE)
+    if not uv_match:
+        return text, False
+    uv_start = uv_match.start()
+
+    refs_after = None
+    rn_after = None
+    for m in re.finditer(
+        r"^#{2,3}\s+References\b.*?(?=^#{2,3}\s+\w|\Z)",
+        text[uv_start:],
+        re.MULTILINE | re.IGNORECASE | re.DOTALL,
+    ):
+        refs_after = (m.start() + uv_start, m.end() + uv_start)
+        break
+    for m in re.finditer(
+        r"^#{2,3}\s+Reader\s+Note\b.*?(?=^#{2,3}\s+\w|\Z)",
+        text[uv_start:],
+        re.MULTILINE | re.IGNORECASE | re.DOTALL,
+    ):
+        rn_after = (m.start() + uv_start, m.end() + uv_start)
+        break
+
+    if not refs_after and not rn_after:
+        return text, False
+
+    # Build: (text up to Unverified) + (extracted Refs) + (extracted Reader Note) + (Unverified + everything else, with the extracted blocks removed)
+    cuts = sorted([c for c in (refs_after, rn_after) if c is not None], key=lambda x: x[0])
+    pre = text[:uv_start].rstrip()
+    tail = text[uv_start:]
+    extracted: list[str] = []
+    # Remove the cuts from `tail` while collecting them, in original order.
+    # Work in absolute coords on the full `text`.
+    extracts = []
+    for start, end in cuts:
+        block = text[start:end].strip()
+        extracts.append(block)
+    # Reconstruct tail without the extracted blocks (preserve other content).
+    keep_tail = tail
+    for start, end in sorted(cuts, key=lambda x: -x[0]):  # reverse to keep offsets stable
+        rel_start = start - uv_start
+        rel_end = end - uv_start
+        keep_tail = keep_tail[:rel_start] + keep_tail[rel_end:]
+    # Order extracted blocks canonically: References first, then Reader Note.
+    refs_block = next((e for e in extracts if re.match(r"#{2,3}\s+References\b", e, re.I)), None)
+    rn_block = next((e for e in extracts if re.match(r"#{2,3}\s+Reader\s+Note\b", e, re.I)), None)
+    middle_parts = [b for b in (refs_block, rn_block) if b]
+    middle = "\n\n".join(middle_parts)
+    new_text = f"{pre}\n\n{middle}\n\n{keep_tail.lstrip()}" if middle else text
+    return new_text, True
+
+
+def _ensure_references_section(text: str) -> tuple[str, bool]:
+    """Build a `### References:` section from inline sermon citations if the
+    answer contains citations but no References block.
+
+    Deduplicates citations preserving first-appearance order.
+    """
+    if re.search(r"^#{2,3}\s+References\b", text, re.MULTILINE | re.IGNORECASE):
+        return text, False
+
+    seen: list[str] = []
+    seen_set: set[str] = set()
+    for m in SERMON_REF_PATTERN.finditer(text):
+        cite = m.group(0)
+        if cite not in seen_set:
+            seen.append(cite)
+            seen_set.add(cite)
+    if not seen:
+        return text, False
+
+    refs_block = "### References:\n" + "\n".join(f"- {c}" for c in seen)
+
+    # Insert before Reader Note if present (Reader Note must come AFTER References),
+    # otherwise before Unverified, otherwise at end.
+    rn_match = re.search(r"^#{2,3}\s+Reader\s+Note\b", text, re.MULTILINE | re.IGNORECASE)
+    if rn_match:
+        before = text[: rn_match.start()].rstrip()
+        after = text[rn_match.start():]
+        return f"{before}\n\n{refs_block}\n\n{after}", True
+
+    uv_match = re.search(r"^#{2,3}\s+Unverified\b", text, re.MULTILINE | re.IGNORECASE)
+    if uv_match:
+        before = text[: uv_match.start()].rstrip()
+        after = text[uv_match.start():]
+        return f"{before}\n\n{refs_block}\n\n{after}", True
+
+    return f"{text.rstrip()}\n\n{refs_block}\n", True
+
+
+def _ensure_reader_note(
+    text: str,
+    *,
+    has_biography_call: bool,
+) -> tuple[str, bool]:
+    """Append the canonical Reader Note if it's missing but the answer used
+    sermon or biography evidence. Inserts BEFORE any Unverified section so
+    Unverified stays terminal (per the prompt).
+    """
+    if re.search(r"^#{2,3}\s+Reader\s+Note\b", text, re.MULTILINE | re.IGNORECASE):
+        return text, False
+    if not (has_sermon_reference(text) or has_biography_call):
+        return text, False
+
+    unverified_match = re.search(
+        r"^#{2,3}\s+Unverified\b", text, re.MULTILINE | re.IGNORECASE
+    )
+    if unverified_match:
+        before = text[: unverified_match.start()].rstrip()
+        after = text[unverified_match.start():]
+        return f"{before}\n\n{_READER_NOTE_TEXT}\n\n{after}", True
+    return f"{text.rstrip()}\n\n{_READER_NOTE_TEXT}\n", True
+
+
 def _append_external_section(answer: str, external_info: dict[str, Any]) -> str:
     if UNVERIFIED_SECTION_HEADER in answer:
         return answer
@@ -481,6 +633,7 @@ def finalize_answer(
     external_info: dict[str, Any] | None,
     refusal_message: str,
     insufficient_context_message: str | None = None,
+    tool_call_counts: dict[str, int] | None = None,
 ) -> PostcheckResult:
     """
     Normalize model output before returning to client.
@@ -541,6 +694,28 @@ def finalize_answer(
     # Strip Unverified section if it has no real narrative (just disclaimer + links)
     text = _strip_empty_unverified_section(text)
 
+    # Collapse standalone "Evidence: [...]" lines (must be inline per the prompt).
+    text, evidence_collapsed = _collapse_standalone_evidence_lines(text)
+
+    # Auto-build References from inline sermon citations if the model omitted
+    # the consolidated list. Runs BEFORE Reader Note insertion so ordering
+    # (References → Reader Note → Unverified) stays correct.
+    text, references_added = _ensure_references_section(text)
+
+    # Auto-append the canonical Reader Note if biography_search was called or
+    # sermon citations exist and the model omitted the Reader Note section.
+    has_biography_call = bool(
+        tool_call_counts and tool_call_counts.get("biography_search", 0) > 0
+    )
+    text, reader_note_appended = _ensure_reader_note(
+        text, has_biography_call=has_biography_call
+    )
+
+    # Enforce the canonical Refs → Reader Note → Unverified ordering. The
+    # model occasionally emits References AFTER Unverified, which the FE
+    # parser does not handle and the prompt explicitly disallows.
+    text, sections_reordered = _reorder_sections(text)
+
     return PostcheckResult(
         mode="answer",
         answer=text,
@@ -553,6 +728,10 @@ def finalize_answer(
             ),
             *(["normalized_answer_header"] if normalized_answer_header else []),
             *(["relocated_internet_content_to_unverified"] if relocated else []),
+            *(["collapsed_standalone_evidence_lines"] if evidence_collapsed else []),
+            *(["built_missing_references_section"] if references_added else []),
+            *(["appended_missing_reader_note"] if reader_note_appended else []),
+            *(["reordered_sections"] if sections_reordered else []),
         ],
     )
 

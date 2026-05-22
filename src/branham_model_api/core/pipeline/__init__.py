@@ -76,6 +76,10 @@ from .signals import (
     compute_signals,
     detect_quote_intent,
 )
+from .early_gates import (
+    is_specific_fact_query,
+    is_unclear_query,
+)
 
 __all__ = [
     # Main pipeline
@@ -117,4 +121,7 @@ __all__ = [
     "group_expanded_by_sermon",
     "format_sermon_context",
     "format_all_context",
+    # Early refusal gates
+    "is_specific_fact_query",
+    "is_unclear_query",
 ]

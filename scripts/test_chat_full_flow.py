@@ -46,6 +46,8 @@ from branham_model_api.core.pipeline import (  # noqa: E402
     finalize_answer,
     is_bible_query,
     is_comparison_query,
+    is_specific_fact_query,
+    is_unclear_query,
 )
 from branham_model_api.core.prompts import (  # noqa: E402
     build_chat_messages,
@@ -89,63 +91,247 @@ def _slug(s: str) -> str:
 
 def _stress_cases() -> list[dict[str, Any]]:
     """
-    Prompt suite for Grok stress testing across query categories.
+    Stress test suite covering all query categories defined in the user spec.
 
-    Notes:
-    - Keep some intentionally vague/incomplete to test guardrails.
-    - Include non-English to exercise the English-only gate.
-    - Include off-domain to trigger refusal.
+    Each case includes an `expected` field with `mode` and behavior tags the
+    audit step can check. Categories covered:
+      - verbatim_quote, biography, bible_only, bible_plus_sermon,
+        comparison_internal, internet_branham_followers, detailed_analysis,
+        specific_facts_insufficient_context, off_topic_refusal, unclear,
+        non_branham_theology, non_english_with_hint, non_english_ascii_only.
     """
     return [
-        # Verbatim / quote seeking
+        # ── Verbatim / quote-seeking → must call db_search ───────────────
         {
             "name": "verbatim_quote_faith",
+            "category": "verbatim_quote",
             "query": "Give me a verbatim quote from Brother Branham about faith, with the exact paragraph citations.",
+            "paraphrased": "I need an exact word-for-word quote from Bro Branham on the topic of faith, including precise paragraph references.",
+            "expected": {"mode": "answer", "should_call": ["db_search"], "sections": ["Quotes", "References", "Reader Note"]},
         },
-        # Comparison
-        {
-            "name": "comparison_serpent_seed",
-            "query": "Compare what Brother Branham taught about the serpent seed with mainstream Christian teaching. Use sermon citations.",
-        },
-        # Biography (should encourage biography tool use)
+        # ── Biography → must call biography_search ───────────────────────
         {
             "name": "biography_branham",
+            "category": "biography",
             "query": "Give me a concise biography of William Marrion Branham (dates, major events) and cite sermons where he mentions key points.",
+            "paraphrased": "Provide a short life history of W.M. Branham covering key dates and milestones, and cite sermons where he touches on them.",
+            "expected": {"mode": "answer", "should_call": ["biography_search"], "sections": ["References", "Reader Note"]},
         },
-        # Detailed analysis
         {
-            "name": "detailed_analysis_predestination",
-            "query": "Do a detailed analysis of Brother Branham's teaching on predestination and election, and support it with multiple sermon citations.",
+            "name": "biography_calling_event",
+            "category": "biography",
+            "query": "When and how did Brother Branham receive the commission from the angel? Give the date and place.",
+            "paraphrased": "Describe the circumstances of Bro Branham's angelic commissioning — what was the date and the location?",
+            # References is OPTIONAL on pure-biography answers (no inline sermon
+            # citations means an empty References list, which the prompt disallows).
+            "expected": {"mode": "answer", "should_call": ["biography_search"], "sections": ["Reader Note"]},
         },
-        # Incomplete / unclear
-        {"name": "incomplete_i_want_to", "query": "I want to"},
-        {"name": "unclear_help_me", "query": "help me understand this"},
-        {"name": "unclear_what_about_it", "query": "What about it?"},
-        # Bible-only prompts (allowed)
+        # ── Pure Bible queries (no sermon citation expected) ─────────────
         {
             "name": "bible_only_john_316",
+            "category": "bible_only",
             "query": "Explain John 3:16 plainly using the Bible only (no external sources).",
+            "paraphrased": "Walk me through John 3:16 using only Scripture — no outside material.",
+            "expected": {"mode": "answer", "no_sections": ["Quotes", "References"]},
         },
         {
             "name": "bible_only_revelation_10_7",
+            "category": "bible_only",
             "query": "Explain Revelation 10:7 and why it matters. Keep it Bible-focused.",
+            "paraphrased": "What does Revelation 10:7 mean and why is it significant? Stay within the Bible.",
+            "expected": {"mode": "answer", "no_sections": ["Quotes", "References"]},
         },
-        # Other language prompts (English-only gate)
-        {"name": "spanish_question", "query": "¿Qué enseñó el Hermano Branham sobre la fe?", "user_language": "es"},
-        {"name": "french_question", "query": "Parle-moi des sept âges de l'Église.", "user_language": "fr"},
-        # External “men of God” / off-domain comparisons
+        # ── Bible + sermon (both must appear) ────────────────────────────
         {
-            "name": "external_men_of_god",
-            "query": "Compare the teachings of Brother Branham and Billy Graham on salvation. Give 5 points each.",
+            "name": "bible_plus_sermon_baptism",
+            "category": "bible_plus_sermon",
+            "query": "What does the Bible teach about baptism in Jesus' name, and what did Brother Branham preach on it? Give Scripture and sermon citations.",
+            "paraphrased": "What's the biblical view on baptism in the name of Jesus, and how did Bro Branham preach about it? Include scripture and sermon refs.",
+            # Query asks for citations, not verbatim — Quotes is OPTIONAL per prompt.
+            "expected": {"mode": "answer", "sections": ["References", "Reader Note"]},
         },
-        # Refusal triggers (off-domain)
-        {"name": "refusal_capital_france", "query": "What is the capital of France?"},
-        {"name": "refusal_superbowl", "query": "Who won the Super Bowl in 2024?"},
-        {"name": "refusal_stock_price", "query": "What is the current stock price of Apple?"},
-        # Refusal-ish ambiguous theology outside sermons
+        {
+            "name": "bible_plus_sermon_seven_seals",
+            "category": "bible_plus_sermon",
+            "query": "Explain the Seven Seals from Revelation 6 and tie it to Brother Branham's sermons on the subject, with verses and verbatim quotes.",
+            "paraphrased": "Break down the Seven Seals of Revelation 6 and connect them to Bro Branham's teaching, with Bible verses and exact quotes.",
+            "expected": {"mode": "answer", "sections": ["Quotes", "References", "Reader Note"]},
+        },
+        # ── Internal comparison (Branham vs another teacher, sermon-cited) ─
+        # NOTE: Quotes is OPTIONAL here per the system prompt (only required when user
+        # explicitly asks for verbatim wording). Audit loosened accordingly.
+        {
+            "name": "comparison_serpent_seed",
+            "category": "comparison_internal",
+            "query": "Compare what Brother Branham taught about the serpent seed with mainstream Christian teaching. Use sermon citations.",
+            "paraphrased": "Contrast Bro Branham's serpent seed doctrine with what mainstream Christianity teaches — use sermon references.",
+            "expected": {"mode": "answer", "sections": ["References", "Reader Note"]},
+        },
+        # ── Detailed analysis with multi-sermon citations ────────────────
+        {
+            "name": "detailed_analysis_predestination",
+            "category": "detailed_analysis",
+            "query": "Do a detailed analysis of Brother Branham's teaching on predestination and election, and support it with multiple sermon citations.",
+            "paraphrased": "Give me a thorough study of Bro Branham's teaching on predestination and election, backed up by several sermon citations.",
+            "expected": {"mode": "answer", "sections": ["Quotes", "References", "Reader Note"]},
+        },
+        # ── Internet search about Branham followers / family ─────────────
+        {
+            "name": "internet_branham_son_joseph",
+            "category": "internet_branham_followers",
+            "query": "Tell me about Joseph Branham, Brother Branham's son, and what he does today with Voice of God Recordings. Use external sources for current info.",
+            "paraphrased": "Who is Joseph Branham (Bro Branham's son), and what's his current role at VGR? Pull in external sources for the present-day facts.",
+            # References is OPTIONAL for pure-internet answers — no sermon
+            # citations means an empty References list, which the prompt disallows.
+            "expected": {"mode": "answer", "should_call": ["internet_search"], "sections": ["Unverified"]},
+        },
+        {
+            "name": "internet_branham_followers_today",
+            "category": "internet_branham_followers",
+            "query": "Where are the largest Branham 'Message' churches today and who are the most prominent current ministers? Use external sources.",
+            "paraphrased": "Which Branham Message congregations are biggest today, and who are the leading present-day ministers? Cite external sources.",
+            "expected": {"mode": "answer", "should_call": ["internet_search"], "sections": ["Unverified"]},
+        },
+        # ── Specific factual queries that the corpus does NOT contain ────
+        # These must return refusal #2 (insufficient_context_message), NOT
+        # refusal #1 (off-topic). Server-emitted insufficient-context refusal
+        # appears in postcheck mode="refusal" with the specific wording.
+        {
+            "name": "specific_cadillac_model",
+            "category": "specific_facts_insufficient_context",
+            "query": "What model of Cadillac did Brother Branham drive? Give the year and trim.",
+            "paraphrased": "What was Bro Branham's Cadillac model and year?",
+            "expected": {"mode": "refusal", "refusal_type": "insufficient_context"},
+        },
+        {
+            "name": "specific_home_street_address",
+            "category": "specific_facts_insufficient_context",
+            "query": "What was Brother Branham's exact home street address in Jeffersonville, Indiana?",
+            "paraphrased": "What was Bro Branham's home address in Jeffersonville?",
+            "expected": {"mode": "refusal", "refusal_type": "insufficient_context"},
+        },
+        {
+            "name": "specific_favorite_hymn",
+            "category": "specific_facts_insufficient_context",
+            "query": "What was Brother Branham's personal favorite hymn?",
+            "paraphrased": "What was Bro Branham's favorite hymn?",
+            "expected": {"mode": "refusal", "refusal_type": "insufficient_context"},
+        },
+        # ── Off-topic refusal (refusal #1) ───────────────────────────────
+        {
+            "name": "refusal_capital_france",
+            "category": "off_topic_refusal",
+            "query": "What is the capital of France?",
+            "paraphrased": "Tell me the capital city of France.",
+            "expected": {"mode": "refusal", "refusal_type": "off_topic"},
+        },
+        {
+            "name": "refusal_superbowl",
+            "category": "off_topic_refusal",
+            "query": "Who won the Super Bowl in 2024?",
+            "paraphrased": "Which NFL team took home the 2024 Super Bowl championship?",
+            "expected": {"mode": "refusal", "refusal_type": "off_topic"},
+        },
+        {
+            "name": "refusal_stock_price",
+            "category": "off_topic_refusal",
+            "query": "What is the current stock price of Apple?",
+            "paraphrased": "What's Apple's current share price?",
+            "expected": {"mode": "refusal", "refusal_type": "off_topic"},
+        },
+        # ── Unclear / incomplete ─────────────────────────────────────────
+        {"name": "incomplete_i_want_to", "category": "unclear", "query": "I want to",
+         "paraphrased": "I'd like to",
+         "expected": {"mode": "refusal"}},
+        {"name": "unclear_help_me", "category": "unclear", "query": "help me understand this",
+         "paraphrased": "Help me with this",
+         "expected": {"mode": "refusal"}},
+        {"name": "unclear_what_about_it", "category": "unclear", "query": "What about it?",
+         "paraphrased": "What about that?",
+         "expected": {"mode": "refusal"}},
+        # ── Off-domain theology comparison (refuse, don't fabricate) ─────
         {
             "name": "refusal_non_branham_theology",
+            "category": "non_branham_theology",
             "query": "Give me a full systematic theology of Calvinism vs Arminianism with citations from modern theologians.",
+            "paraphrased": "Lay out a complete systematic theology comparing Calvinism and Arminianism with quotes from contemporary theologians.",
+            "expected": {"mode": "refusal_or_partial"},
+        },
+        # ── Non-English WITH language hint (server ASCII gate catches) ───
+        {
+            "name": "spanish_with_hint",
+            "category": "non_english_with_hint",
+            "query": "¿Qué enseñó el Hermano Branham sobre la fe?",
+            "paraphrased": "¿Cuál fue la enseñanza del Hermano Branham acerca de la fe?",
+            "user_language": "es",
+            "expected": {"mode": "answer", "language_gate": "server"},
+        },
+        {
+            "name": "french_with_hint",
+            "category": "non_english_with_hint",
+            "query": "Parle-moi des sept âges de l'Église.",
+            "paraphrased": "Raconte-moi les sept âges de l'Église.",
+            "user_language": "fr",
+            "expected": {"mode": "answer", "language_gate": "server"},
+        },
+        # ── Non-English WITHOUT hint AND no diacritics — only the system-
+        # prompt-level second gate can catch these. The server filter passes
+        # them through as "English". Critical test for the new language block.
+        {
+            "name": "spanish_ascii_only",
+            "category": "non_english_ascii_only",
+            "query": "Que enseno el hermano Branham sobre la fe y la salvacion",
+            "paraphrased": "Como predicaba el hermano Branham sobre la fe y la salvacion",
+            "expected": {"mode": "answer", "language_gate": "model"},
+        },
+        {
+            "name": "french_ascii_only",
+            "category": "non_english_ascii_only",
+            "query": "Que disait le frere Branham sur la foi et le bapteme",
+            "paraphrased": "Comment le frere Branham enseignait il sur la foi et le bapteme",
+            "expected": {"mode": "answer", "language_gate": "model"},
+        },
+        {
+            "name": "portuguese_ascii_only",
+            "category": "non_english_ascii_only",
+            "query": "O que o irmao Branham ensinou sobre a fe e o batismo",
+            "paraphrased": "Como o irmao Branham pregava sobre a fe e o batismo",
+            "expected": {"mode": "answer", "language_gate": "model"},
+        },
+        # ── Multi-turn conversation (3 follow-ups, threaded via conversation_id + summary) ──
+        # The runner detects `turns` and runs them sequentially, accumulating
+        # history_window and threading conversation_summary between turns.
+        # Each turn becomes its own audit row.
+        #
+        # NOTE on audit: Quotes is OPTIONAL on these (queries ask for citations,
+        # not verbatim). For t2 and t3, db_search re-search is also optional —
+        # the system prompt explicitly allows the model to skip a re-search when
+        # the prior turn's quoted evidence already contains the answer.
+        {
+            "name": "multi_turn_seven_seals",
+            "category": "multi_turn_followups",
+            "turns": [
+                {
+                    "label": "t1_seven_seals_intro",
+                    "query": "What did Brother Branham teach about the Seven Seals of Revelation? Give sermon citations.",
+                    "paraphrased": "How did Bro Branham explain the Seven Seals of Revelation? Include sermon references.",
+                    # db_search re-search is OPTIONAL: when retrieved RAG context already
+                    # supports the answer, the prompt explicitly prefers zero tool calls.
+                    "expected": {"mode": "answer", "sections": ["References", "Reader Note"]},
+                },
+                {
+                    "label": "t2_seventh_seal_specific",
+                    "query": "Now focus specifically on the Seventh Seal — what did he say about its silence and timing?",
+                    "paraphrased": "Zooming in on the Seventh Seal — what did he teach about its silence and when it would happen?",
+                    "expected": {"mode": "answer", "sections": ["References"]},
+                },
+                {
+                    "label": "t3_seal_to_rapture",
+                    "query": "Did he ever tie the Seventh Seal to the Rapture or the coming of the Lord? Cite the sermon paragraphs.",
+                    "paraphrased": "Did Bro Branham ever connect the Seventh Seal to the Rapture or Christ's return? Give sermon paragraph references.",
+                    "expected": {"mode": "answer", "sections": ["References", "Reader Note"]},
+                },
+            ],
         },
     ]
 
@@ -365,6 +551,39 @@ def _run_full_flow(
         }
         return run_report
 
+    # ---- Pre-retrieval early-refusal gates (mirrors chat.py) ----
+    has_history = bool(request.history_window)
+    has_summary = bool(str(request.conversation_summary or "").strip())
+    gate_hit, gate_reason = is_unclear_query(
+        request.query, has_history=has_history, has_summary=has_summary
+    )
+    if not gate_hit:
+        gate_hit, gate_reason = is_specific_fact_query(request.query)
+    if gate_hit:
+        refusal = _get_insufficient_context_message()
+        logger.info("Early refusal gate fired: %s", gate_reason)
+        run_report["retrieval"] = {"skipped": True, "reason": gate_reason}
+        run_report["tool_outputs"] = []
+        run_report["tool_call_counts"] = {"db_search": 0, "biography_search": 0, "internet_search": 0}
+        run_report["tool_total_exhausted"] = False
+        run_report["tool_limit_event_count"] = 0
+        run_report["tool_limit_events"] = []
+        run_report["llm_tool_call_trace"] = {
+            "iterations": 0,
+            "tools_offered_per_iteration": [],
+            "tools_requested_per_iteration": [],
+            "total_tools_requested": 0,
+            "requested_tool_names": [],
+        }
+        run_report["postcheck"] = {"mode": "refusal", "issues": []}
+        run_report["final"] = {
+            "mode": "refusal",
+            "answer": refusal,
+            "external_info": None,
+            "conversation_summary_out": None,
+        }
+        return run_report
+
     retrieval_result = runtime.retrieve(
         retrieval_query,
         user_language=request.user_language,
@@ -435,12 +654,14 @@ def _run_full_flow(
     ]
 
     external_info = _extract_external_info(request.query, loop_result.tool_outputs)
+    _registry_counts = runtime.tool_registry.call_counts()
     checked = finalize_answer(
         query=request.query,
         answer=loop_result.answer,
         external_info=external_info,
         refusal_message=_get_fixed_refusal_message(),
         insufficient_context_message=_get_insufficient_context_message(),
+        tool_call_counts=_registry_counts,
     )
     checked = _maybe_override_refusal_for_allowed_query(
         runtime=runtime,
@@ -538,6 +759,12 @@ def main() -> None:
         default=None,
         help="Optional cap on the number of stress cases to run.",
     )
+    parser.add_argument(
+        "--paraphrased",
+        action="store_true",
+        help="Use the 'paraphrased' query/queries on each case instead of the canonical phrasing. "
+        "Reveals overfitting to literal benchmark text and stress-tests the early-refusal regexes.",
+    )
     args = parser.parse_args()
 
     if args.repeat < 1:
@@ -549,6 +776,15 @@ def main() -> None:
     if args.stress or args.tool_smoke:
         suite_name = "tool_smoke" if args.tool_smoke else "stress"
         cases = _tool_smoke_cases() if args.tool_smoke else _stress_cases()
+        if args.paraphrased:
+            for case in cases:
+                if isinstance(case.get("turns"), list):
+                    for turn in case["turns"]:
+                        if turn.get("paraphrased"):
+                            turn["query"] = turn["paraphrased"]
+                elif case.get("paraphrased"):
+                    case["query"] = case["paraphrased"]
+            logger.info("Using PARAPHRASED queries for the suite.")
         if args.shuffle:
             random.shuffle(cases)
         if args.max_cases is not None:
@@ -570,90 +806,154 @@ def main() -> None:
         results: list[dict[str, Any]] = []
         t0 = time.perf_counter()
 
+        def _run_one_turn(
+            *,
+            rep: int,
+            idx: int,
+            sub_idx: int | None,
+            name: str,
+            category: str,
+            expected: dict[str, Any],
+            query: str,
+            user_language: str | None,
+            conversation_id: str,
+            history_window: list[dict[str, Any]],
+            conversation_summary: str,
+        ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+            """Run one full-flow request and return (row, run_report).
+
+            Used for both single-turn cases and per-turn entries of multi-turn
+            cases. The audit script treats each row as its own case.
+            """
+            t_case0 = time.perf_counter()
+            ok = True
+            error: str | None = None
+            run_report: dict[str, Any] | None = None
+            try:
+                run_report = _run_full_flow(
+                    logger=logger,
+                    runtime=runtime,
+                    llm_cfg=llm_cfg,
+                    conversation_id=conversation_id,
+                    query=query,
+                    user_language=user_language,
+                    history_window=history_window,
+                    conversation_summary=conversation_summary,
+                    dump_artifacts=False,
+                )
+            except (LiteLLMRateLimitError, LiteLLMServiceUnavailableError) as exc:
+                ok = False
+                error = str(exc)
+            except Exception as exc:  # pragma: no cover
+                ok = False
+                error = str(exc)
+
+            elapsed_ms = (time.perf_counter() - t_case0) * 1000
+            final = (run_report or {}).get("final", {}) if run_report else {}
+            mode = final.get("mode")
+            answer = final.get("answer") or ""
+            retrieval = (run_report or {}).get("retrieval", {}) if run_report else {}
+            tool_counts = (run_report or {}).get("tool_call_counts", {}) if run_report else {}
+            issues = ((run_report or {}).get("postcheck", {}) or {}).get("issues", []) if run_report else []
+
+            row = {
+                "ok": ok and bool(run_report) and mode in {"answer", "refusal"},
+                "error": error,
+                "rep": rep,
+                "idx": idx,
+                "sub_idx": sub_idx,
+                "name": name,
+                "category": category,
+                "expected": expected,
+                "conversation_id": conversation_id,
+                "user_language": user_language,
+                "query": query,
+                "elapsed_ms": elapsed_ms,
+                "mode": mode,
+                "issues": issues,
+                "retrieval": retrieval,
+                "tool_call_counts": tool_counts,
+                "answer_chars": len(str(answer)),
+            }
+
+            should_save = args.save_artifacts == "all" or (
+                args.save_artifacts == "failures" and not row["ok"]
+            )
+            if should_save and run_report:
+                if sub_idx is None:
+                    case_dir = out_dir / f"{run_ts}_cases" / f"r{rep}_{idx:03d}_{_slug(name)}"
+                else:
+                    case_dir = (
+                        out_dir / f"{run_ts}_cases"
+                        / f"r{rep}_{idx:03d}_t{sub_idx}_{_slug(name)}"
+                    )
+                case_dir.mkdir(parents=True, exist_ok=True)
+                run_report["case_spec"] = {"name": name, "category": category, "expected": expected}
+                _dump_json(case_dir / "run_report.json", run_report)
+                _dump_text(case_dir / "answer.txt", str(answer))
+
+            if not row["ok"]:
+                logger.warning(
+                    "FAIL rep=%d idx=%d name=%s mode=%s elapsed=%.0fms err=%s",
+                    rep, idx, name, mode, elapsed_ms, (error or "")[:200],
+                )
+            else:
+                logger.info(
+                    "OK rep=%d idx=%d name=%s mode=%s elapsed=%.0fms",
+                    rep, idx, name, mode, elapsed_ms,
+                )
+            return row, run_report
+
         for rep in range(args.repeat):
             for idx, case in enumerate(cases):
-                name = str(case.get("name") or f"case_{idx}")
-                q = str(case.get("query") or "")
+                case_name = str(case.get("name") or f"case_{idx}")
+                category = case.get("category") or ""
                 ul = case.get("user_language")
-                conv_id = f"{suite_name}-{run_ts}-r{rep}-{idx:03d}-{_slug(name)}"
+                conv_id = f"{suite_name}-{run_ts}-r{rep}-{idx:03d}-{_slug(case_name)}"
 
-                t_case0 = time.perf_counter()
-                ok = True
-                error: str | None = None
-                run_report: dict[str, Any] | None = None
-                try:
-                    run_report = _run_full_flow(
-                        logger=logger,
-                        runtime=runtime,
-                        llm_cfg=llm_cfg,
-                        conversation_id=conv_id,
-                        query=q,
-                        user_language=ul,
-                        history_window=[],
-                        conversation_summary="",
-                        dump_artifacts=False,
-                    )
-                except (LiteLLMRateLimitError, LiteLLMServiceUnavailableError) as exc:
-                    ok = False
-                    error = str(exc)
-                except Exception as exc:  # pragma: no cover
-                    ok = False
-                    error = str(exc)
-
-                elapsed_ms = (time.perf_counter() - t_case0) * 1000
-                final = (run_report or {}).get("final", {}) if run_report else {}
-                mode = final.get("mode")
-                answer = final.get("answer") or ""
-                retrieval = (run_report or {}).get("retrieval", {}) if run_report else {}
-                tool_counts = (run_report or {}).get("tool_call_counts", {}) if run_report else {}
-                issues = ((run_report or {}).get("postcheck", {}) or {}).get("issues", []) if run_report else []
-
-                row = {
-                    "ok": ok and bool(run_report) and mode in {"answer", "refusal"},
-                    "error": error,
-                    "rep": rep,
-                    "idx": idx,
-                    "name": name,
-                    "conversation_id": conv_id,
-                    "user_language": ul,
-                    "query": q,
-                    "elapsed_ms": elapsed_ms,
-                    "mode": mode,
-                    "issues": issues,
-                    "retrieval": retrieval,
-                    "tool_call_counts": tool_counts,
-                    "answer_chars": len(str(answer)),
-                }
-                results.append(row)
-
-                should_save = args.save_artifacts == "all" or (
-                    args.save_artifacts == "failures" and not row["ok"]
-                )
-                if should_save and run_report:
-                    case_dir = out_dir / f"{run_ts}_cases" / f"r{rep}_{idx:03d}_{_slug(name)}"
-                    case_dir.mkdir(parents=True, exist_ok=True)
-                    _dump_json(case_dir / "run_report.json", run_report)
-                    _dump_text(case_dir / "answer.txt", str(answer))
-
-                if not row["ok"]:
-                    logger.warning(
-                        "FAIL rep=%d idx=%d name=%s mode=%s elapsed=%.0fms err=%s",
-                        rep,
-                        idx,
-                        name,
-                        mode,
-                        elapsed_ms,
-                        (error or "")[:200],
-                    )
+                if isinstance(case.get("turns"), list) and case["turns"]:
+                    # Multi-turn: thread conversation_id + accumulate history + carry summary.
+                    history: list[dict[str, Any]] = []
+                    summary = ""
+                    for sub_idx, turn in enumerate(case["turns"]):
+                        turn_label = str(turn.get("label") or f"t{sub_idx}")
+                        turn_name = f"{case_name}__{turn_label}"
+                        turn_query = str(turn.get("query") or "")
+                        turn_expected = turn.get("expected") or {}
+                        row, rr = _run_one_turn(
+                            rep=rep, idx=idx, sub_idx=sub_idx,
+                            name=turn_name, category=category,
+                            expected=turn_expected, query=turn_query,
+                            user_language=ul, conversation_id=conv_id,
+                            history_window=list(history),
+                            conversation_summary=summary,
+                        )
+                        results.append(row)
+                        # Update history + summary for next turn (only if turn succeeded).
+                        if rr:
+                            final = rr.get("final") or {}
+                            assistant_answer = str(final.get("answer") or "")
+                            history.append({"role": "user", "content": turn_query})
+                            history.append({"role": "assistant", "content": assistant_answer})
+                            new_summary = (
+                                rr.get("conversation_summary_out")
+                                or final.get("conversation_summary")
+                                or ""
+                            )
+                            if new_summary:
+                                summary = new_summary
                 else:
-                    logger.info(
-                        "OK rep=%d idx=%d name=%s mode=%s elapsed=%.0fms",
-                        rep,
-                        idx,
-                        name,
-                        mode,
-                        elapsed_ms,
+                    # Single-turn (existing behavior).
+                    q = str(case.get("query") or "")
+                    expected = case.get("expected") or {}
+                    row, _rr = _run_one_turn(
+                        rep=rep, idx=idx, sub_idx=None,
+                        name=case_name, category=category,
+                        expected=expected, query=q,
+                        user_language=ul, conversation_id=conv_id,
+                        history_window=[], conversation_summary="",
                     )
+                    results.append(row)
 
         total_ms = (time.perf_counter() - t0) * 1000
         ok_count = sum(1 for r in results if r.get("ok"))

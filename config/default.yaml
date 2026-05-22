@@ -40,11 +40,23 @@ llm:
   temperature: 0.2
   timeout: 30.0
   reasoning:
-    effort: 'none'
-    exclude: true
+    # Production: Kimi K2.5 with reasoning fully off. Confirmed in the
+    # 2026-05-21 sweep that Kimi calls tools and follows the prompt without
+    # any reasoning budget; this is the requirement for our SSE flow.
+    enabled: false
+  # OpenRouter provider routing: pin to Fireworks (fastest verified host for
+  # Kimi K2.5). DeepInfra and Together are fallbacks. Drops median latency
+  # from ~19.6s (default routing) to ~11.6s.
+  extra_body:
+    provider:
+      order:
+        - fireworks
+        - deepinfra
+        - together
+      allow_fallbacks: true
   providers:
     openrouter:
-      model: openrouter/x-ai/grok-4.3
+      model: openrouter/moonshotai/kimi-k2.5
       base_url: https://openrouter.ai/api/v1
       key_prefix: OPENROUTER_API_KEY
     deepseek:

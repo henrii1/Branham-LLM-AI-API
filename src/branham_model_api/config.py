@@ -15,6 +15,26 @@ from typing import Any
 import yaml
 
 
+def _resolve_extra_body(yaml_value: Any) -> dict[str, Any] | None:
+    """Merge YAML extra_body with optional LLM_EXTRA_BODY_JSON env override.
+
+    LLM_EXTRA_BODY_JSON lets the driver script (benchmark_models.sh) inject
+    per-model OpenRouter provider routing without editing config files.
+    """
+    import json as _json
+
+    base: dict[str, Any] = dict(yaml_value) if isinstance(yaml_value, dict) else {}
+    env_raw = os.getenv("LLM_EXTRA_BODY_JSON", "").strip()
+    if env_raw:
+        try:
+            parsed = _json.loads(env_raw)
+            if isinstance(parsed, dict):
+                base.update(parsed)
+        except _json.JSONDecodeError:
+            pass
+    return base or None
+
+
 def _find_config_file() -> Path:
     """Find config/default.yaml relative to project root."""
     # Try relative to this file
@@ -94,6 +114,10 @@ class LLMProviderSettings:
     # Optional provider-agnostic reasoning config (OpenRouter-normalized shape).
     # Example: {"effort": "none", "exclude": True}
     reasoning: dict[str, Any] | None = None
+    # Optional extra_body forwarded to LiteLLM (OpenRouter only).
+    # Example for provider pinning:
+    #   {"provider": {"order": ["fireworks"], "allow_fallbacks": True}}
+    extra_body: dict[str, Any] | None = None
     # Optional multi-provider route configs used when provider == "mixed".
     # Example:
     #   {"deepseek": {"model": "...", "base_url": "...", "key_prefix": "DEEPSEEK_API_KEY"},
@@ -196,6 +220,7 @@ class AppConfig:
             temperature=float(llm_raw.get("temperature", 0.2)),
             timeout=float(llm_raw.get("timeout", 30.0)),
             reasoning=(llm_raw.get("reasoning") if isinstance(llm_raw.get("reasoning"), dict) else None),
+            extra_body=_resolve_extra_body(llm_raw.get("extra_body")),
             routes=routes,
         )
 

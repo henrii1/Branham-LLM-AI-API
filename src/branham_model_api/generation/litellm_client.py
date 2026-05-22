@@ -40,6 +40,7 @@ class LiteLLMClientConfig:
     timeout: float = 30.0
     temperature: float = 0.2
     reasoning: dict[str, Any] | None = None
+    extra_body: dict[str, Any] | None = None
 
 
 def _looks_like_openrouter_route(*, model: str, base_url: str | None) -> bool:
@@ -167,6 +168,8 @@ class LiteLLMClient:
             and _looks_like_openrouter_route(model=self.config.model, base_url=self.config.base_url)
         ):
             kwargs["reasoning"] = self.config.reasoning
+        if self.config.extra_body:
+            kwargs["extra_body"] = self.config.extra_body
         if tools is not None:
             kwargs["tools"] = tools
             if tool_choice is not None:
@@ -280,6 +283,8 @@ class LiteLLMClient:
             and _looks_like_openrouter_route(model=self.config.model, base_url=self.config.base_url)
         ):
             kwargs["reasoning"] = self.config.reasoning
+        if self.config.extra_body:
+            kwargs["extra_body"] = self.config.extra_body
         if tools is not None:
             kwargs["tools"] = tools
             if tool_choice is not None:
